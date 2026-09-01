@@ -66,6 +66,22 @@ local function close_hud()
   hud.win = nil
 end
 
+local function fg_of(group)
+  local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+  return ok and h.fg or nil
+end
+
+--- HUD palette, derived from the active colorscheme.
+local function define_hls()
+  vim.api.nvim_set_hl(0, 'PrtourKicker', { fg = fg_of 'Comment' })
+  vim.api.nvim_set_hl(0, 'PrtourTitle', { fg = fg_of 'Function', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourDim', { fg = fg_of 'NonText' })
+  vim.api.nvim_set_hl(0, 'PrtourKey', { fg = fg_of 'Special', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourNext', { fg = fg_of 'Comment', italic = true })
+  vim.api.nvim_set_hl(0, 'PrtourAdded', { fg = fg_of 'Added' or fg_of 'String', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourRemoved', { fg = fg_of 'Removed' or fg_of 'Error', bold = true })
+end
+
 local saved_maps = {}
 
 --- Run `action`, except in buffers where the key has a real job (quickfix,
@@ -242,10 +258,8 @@ local function teardown()
     pcall(vim.fn.mapset, 'n', false, m)
   end
   saved_maps = {}
-  for w in pairs(state.winbar_wins or {}) do
-    if vim.api.nvim_win_is_valid(w) then
-      vim.wo[w].winbar = ''
-    end
+  if state.badge_buf and vim.api.nvim_buf_is_valid(state.badge_buf) then
+    vim.api.nvim_buf_clear_namespace(state.badge_buf, ns, 0, -1)
   end
   close_hud()
   local gs = gitsigns()
@@ -311,6 +325,29 @@ local function open_hunk(h)
   vim.api.nvim_win_set_cursor(0, { math.min(h.start_line, last), 0 })
   vim.cmd 'normal! zz'
   require('prtour.threads').decorate(vim.api.nvim_get_current_buf(), h.file)
+  -- Transient arrival badges at the hunk's first line; cleared on next jump.
+  if state.badge_buf and vim.api.nvim_buf_is_valid(state.badge_buf) then
+    vim.api.nvim_buf_clear_namespace(state.badge_buf, ns, 0, -1)
+  end
+  state.badge_buf = nil
+  local badges = {}
+  if h.added then
+    badges[#badges + 1] = { '  new file ', 'PrtourAdded' }
+  elseif h.deleted then
+    badges[#badges + 1] = { '  deleted ', 'PrtourRemoved' }
+  end
+  if state.github_viewed and state.github_viewed[h.file] then
+    badges[#badges + 1] = { ' ✓ viewed ', 'PrtourDim' }
+  end
+  if #badges > 0 then
+    define_hls()
+    local buf = vim.api.nvim_get_current_buf()
+    pcall(vim.api.nvim_buf_set_extmark, buf, ns, math.min(h.start_line, last) - 1, 0, {
+      virt_text = badges,
+      virt_text_pos = 'eol',
+    })
+    state.badge_buf = buf
+  end
 end
 
 local function send_viewed(file)
@@ -348,43 +385,6 @@ local function track_visited(h)
       table.insert(state.pending_viewed, h.file)
     end
   end
-end
-
-local function fg_of(group)
-  local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
-  return ok and h.fg or nil
-end
-
---- HUD palette, derived from the active colorscheme.
-local function define_hls()
-  vim.api.nvim_set_hl(0, 'PrtourKicker', { fg = fg_of 'Comment' })
-  vim.api.nvim_set_hl(0, 'PrtourTitle', { fg = fg_of 'Function', bold = true })
-  vim.api.nvim_set_hl(0, 'PrtourDim', { fg = fg_of 'NonText' })
-  vim.api.nvim_set_hl(0, 'PrtourKey', { fg = fg_of 'Special', bold = true })
-  vim.api.nvim_set_hl(0, 'PrtourBar', { fg = fg_of 'Function' })
-  vim.api.nvim_set_hl(0, 'PrtourNext', { fg = fg_of 'Comment', italic = true })
-end
-
---- File identity + status in the winbar of the window showing the hunk.
-local function show_winbar()
-  local h = state.by_id[state.flat[state.pos].id]
-  local parts = { '%#Directory# ' .. h.file:gsub('%%', '%%%%') .. ' %*' }
-  if h.added then
-    parts[#parts + 1] = '%#DiffAdd# NEW FILE %*'
-  elseif h.deleted then
-    parts[#parts + 1] = '%#DiffDelete# DELETED %*'
-  end
-  if state.github_viewed and state.github_viewed[h.file] then
-    parts[#parts + 1] = '%#Comment# ✓ viewed %*'
-  end
-  local win = vim.api.nvim_get_current_win()
-  for w in pairs(state.winbar_wins or {}) do
-    if w ~= win and vim.api.nvim_win_is_valid(w) then
-      vim.wo[w].winbar = ''
-    end
-  end
-  state.winbar_wins = { [win] = true }
-  vim.wo[win].winbar = table.concat(parts, ' ')
 end
 
 local function show_position()
@@ -560,7 +560,6 @@ local function goto_pos(pos)
   open_hunk(h)
   track_visited(h)
   show_position()
-  show_winbar()
   save_progress()
   -- Completion beat when moving forward out of a fully-read step.
   local entered = state.flat[pos].step
