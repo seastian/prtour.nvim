@@ -35,6 +35,27 @@ local function target_for_current_buf()
   return repo_relative(name), 'RIGHT'
 end
 
+--- Render (or re-render) a queued comment's inline preview.
+---@param c table
+local function place_mark(c)
+  if not (c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr)) then
+    return
+  end
+  local virt = {}
+  for bi, bl in ipairs(vim.split(c.body, '\n')) do
+    virt[#virt + 1] = { { (bi == 1 and '┃ 💬 queued: ' or '┃ ') .. bl, 'DiagnosticVirtualTextWarn' } }
+  end
+  -- virt_lines above line 1 render off-screen; put them below instead.
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, c.bufnr, ns, c.line - 1, 0, {
+    id = c.extmark_id,
+    virt_lines = virt,
+    virt_lines_above = c.line > 1,
+  })
+  if ok then
+    c.extmark_id = id
+  end
+end
+
 --- Open an input float to comment on a line range of the current buffer.
 ---@param start_line integer
 ---@param end_line integer
@@ -68,27 +89,81 @@ function M.add(start_line, end_line)
     if body == '' then
       return
     end
-    comments[#comments + 1] = {
+    local c = {
       path = path,
       side = side,
       line = end_line,
       start_line = start_line ~= end_line and start_line or nil,
       body = body,
+      bufnr = target_buf,
     }
-    local virt = {}
-    for bi, bl in ipairs(vim.split(body, '\n')) do
-      virt[#virt + 1] = { { (bi == 1 and '┃ 💬 queued: ' or '┃ ') .. bl, 'DiagnosticVirtualTextWarn' } }
-    end
-    pcall(vim.api.nvim_buf_set_extmark, target_buf, ns, end_line - 1, 0, {
-      virt_lines = virt,
-      virt_lines_above = true,
-    })
+    comments[#comments + 1] = c
+    place_mark(c)
     vim.notify(('prtour: comment queued (%d pending)'):format(#comments))
     pcall(function()
       require('prtour.tour').refresh()
     end)
   end, { buffer = buf })
   vim.cmd 'startinsert'
+end
+
+--- Edit or delete the queued comment under the cursor.
+---@return boolean handled false when no queued comment is here
+function M.edit_at_cursor()
+  local path = target_for_current_buf()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  local idx, c
+  for i, cc in ipairs(comments) do
+    if cc.path == path and lnum >= (cc.start_line or cc.line) and lnum <= cc.line then
+      idx, c = i, cc
+    end
+  end
+  if not c then
+    return false
+  end
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].filetype = 'markdown'
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(c.body, '\n'))
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'cursor',
+    row = 1,
+    col = 0,
+    width = 72,
+    height = 6,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' edit queued comment · <CR> save · D delete · q cancel ',
+    title_pos = 'center',
+  })
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+  vim.keymap.set('n', 'q', close, { buffer = buf })
+  vim.keymap.set('n', '<CR>', function()
+    local body = vim.trim(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n'))
+    close()
+    if body == '' then
+      return
+    end
+    c.body = body
+    place_mark(c)
+    vim.notify 'prtour: comment updated'
+  end, { buffer = buf })
+  vim.keymap.set('n', 'D', function()
+    close()
+    table.remove(comments, idx)
+    if c.extmark_id and c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr) then
+      vim.api.nvim_buf_del_extmark(c.bufnr, ns, c.extmark_id)
+    end
+    vim.notify(('prtour: comment deleted (%d pending)'):format(#comments))
+    pcall(function()
+      require('prtour.tour').refresh()
+    end)
+  end, { buffer = buf })
+  return true
 end
 
 --- Upload queued comments into the viewer's pending review (creating one if

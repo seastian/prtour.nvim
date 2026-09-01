@@ -166,6 +166,14 @@ function M.start(opts)
     require('prtour.threads').reply_at_cursor(opts.pr)
   end, { desc = 'prtour: [R]eply to thread at cursor' })
   vim.keymap.set('n', '<leader>go', M.outline, { desc = 'prtour: tour [O]utline' })
+  vim.keymap.set('n', '<leader>ge', function()
+    if require('prtour.comments').edit_at_cursor() then
+      return
+    end
+    if not require('prtour.threads').edit_own_at_cursor() then
+      vim.notify('prtour: no comment of yours at this line', vim.log.levels.WARN)
+    end
+  end, { desc = 'prtour: [E]dit/delete your comment at cursor' })
   vim.keymap.set('n', '<leader>gd', function()
     local gs = gitsigns()
     if not gs then
@@ -253,6 +261,7 @@ local function teardown()
   pcall(vim.keymap.del, 'n', '<leader>gr')
   pcall(vim.keymap.del, 'n', '<leader>go')
   pcall(vim.keymap.del, 'n', '<leader>gd')
+  pcall(vim.keymap.del, 'n', '<leader>ge')
   require('prtour.threads').clear()
   for _, m in ipairs(saved_maps) do
     pcall(vim.fn.mapset, 'n', false, m)
@@ -435,7 +444,7 @@ local function show_position()
     return segs
   end
   add(keyline { { '⏎', 'next' }, { '⌫', 'prev' }, { leader .. 'go', 'outline' }, { leader .. 'gd', 'split' } })
-  add(keyline { { leader .. 'gc', 'comment' }, { leader .. 'gr', 'reply' }, { leader .. 'gq', 'quit' } })
+  add(keyline { { leader .. 'gc', 'comment' }, { leader .. 'ge', 'edit' }, { leader .. 'gr', 'reply' }, { leader .. 'gq', 'quit' } })
   if not (hud.buf and vim.api.nvim_buf_is_valid(hud.buf)) then
     hud.buf = vim.api.nvim_create_buf(false, true)
     vim.bo[hud.buf].bufhidden = 'hide'

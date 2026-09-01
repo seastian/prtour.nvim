@@ -172,7 +172,7 @@ function M.review_threads(number, cb)
     end
     run({
       'gh', 'api', 'graphql', '--paginate',
-      '-f', 'query=query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line comments(first: 30) { nodes { body databaseId state author { login } } } } } } } }',
+      '-f', 'query=query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line comments(first: 30) { nodes { id body databaseId state viewerDidAuthor author { login } } } } } } } }',
       '-f', 'owner=' .. owner,
       '-f', 'name=' .. name,
       '-F', 'number=' .. number,
@@ -188,10 +188,12 @@ function M.review_threads(number, cb)
           local comments = {}
           for _, c in ipairs(node.comments.nodes or {}) do
             comments[#comments + 1] = {
+              id = c.id,
               author = c.author and c.author.login or '?',
               body = c.body or '',
               database_id = c.databaseId,
               pending = c.state == 'PENDING',
+              mine = c.viewerDidAuthor == true,
             }
           end
           threads[#threads + 1] = {
@@ -288,6 +290,34 @@ function M.submit_review(review_id, event, body, cb)
     '-f', 'rid=' .. review_id,
     '-f', 'event=' .. event,
     '-f', 'body=' .. (body or ''),
+  }, function(stdout, err)
+    cb(stdout ~= nil, err)
+  end)
+end
+
+--- Edit the body of one of the viewer's review comments.
+---@param comment_id string GraphQL node id
+---@param body string
+---@param cb fun(ok: boolean, err: string|nil)
+function M.update_review_comment(comment_id, body, cb)
+  run({
+    'gh', 'api', 'graphql',
+    '-f', 'query=mutation($id: ID!, $body: String!) { updatePullRequestReviewComment(input: {pullRequestReviewCommentId: $id, body: $body}) { pullRequestReviewComment { id } } }',
+    '-f', 'id=' .. comment_id,
+    '-f', 'body=' .. body,
+  }, function(stdout, err)
+    cb(stdout ~= nil, err)
+  end)
+end
+
+--- Delete one of the viewer's review comments.
+---@param comment_id string GraphQL node id
+---@param cb fun(ok: boolean, err: string|nil)
+function M.delete_review_comment(comment_id, cb)
+  run({
+    'gh', 'api', 'graphql',
+    '-f', 'query=mutation($id: ID!) { deletePullRequestReviewComment(input: {id: $id}) { pullRequestReview { id } } }',
+    '-f', 'id=' .. comment_id,
   }, function(stdout, err)
     cb(stdout ~= nil, err)
   end)
