@@ -208,6 +208,91 @@ function M.review_threads(number, cb)
   end)
 end
 
+--- The viewer's pending review id on a PR, if any (nil + no err = none).
+---@param number integer
+---@param cb fun(review_id: string|nil, err: string|nil)
+function M.pending_review_id(number, cb)
+  repo_slug(function(owner, name, err)
+    if not owner then
+      return cb(nil, err)
+    end
+    run({
+      'gh', 'api', 'graphql',
+      '-f', 'query=query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviews(first: 10, states: [PENDING]) { nodes { id viewerDidAuthor } } } } }',
+      '-f', 'owner=' .. owner,
+      '-f', 'name=' .. name,
+      '-F', 'number=' .. number,
+      '--jq', '[.data.repository.pullRequest.reviews.nodes[] | select(.viewerDidAuthor)][0].id // empty',
+    }, function(stdout, err2)
+      if stdout == nil then
+        return cb(nil, err2)
+      end
+      local id = vim.trim(stdout)
+      cb(id ~= '' and id or nil, nil)
+    end)
+  end)
+end
+
+--- Create an empty pending review.
+---@param pr_node_id string
+---@param cb fun(review_id: string|nil, err: string|nil)
+function M.create_pending_review(pr_node_id, cb)
+  run({
+    'gh', 'api', 'graphql',
+    '-f', 'query=mutation($id: ID!) { addPullRequestReview(input: {pullRequestId: $id}) { pullRequestReview { id } } }',
+    '-f', 'id=' .. pr_node_id,
+    '--jq', '.data.addPullRequestReview.pullRequestReview.id',
+  }, function(stdout, err)
+    cb(stdout and vim.trim(stdout) or nil, err)
+  end)
+end
+
+--- Add one comment thread to a pending review.
+---@param review_id string
+---@param c {path: string, line: integer, start_line: integer|nil, side: string, body: string}
+---@param cb fun(ok: boolean, err: string|nil)
+function M.add_review_thread(review_id, c, cb)
+  local query
+  if c.start_line then
+    query = 'mutation($rid: ID!, $path: String!, $line: Int!, $sl: Int!, $side: DiffSide!, $body: String!) { addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, startLine: $sl, side: $side, startSide: $side, body: $body}) { thread { id } } }'
+  else
+    query = 'mutation($rid: ID!, $path: String!, $line: Int!, $side: DiffSide!, $body: String!) { addPullRequestReviewThread(input: {pullRequestReviewId: $rid, path: $path, line: $line, side: $side, body: $body}) { thread { id } } }'
+  end
+  local args = {
+    'gh', 'api', 'graphql',
+    '-f', 'query=' .. query,
+    '-f', 'rid=' .. review_id,
+    '-f', 'path=' .. c.path,
+    '-F', 'line=' .. c.line,
+    '-f', 'side=' .. c.side,
+    '-f', 'body=' .. c.body,
+  }
+  if c.start_line then
+    args[#args + 1] = '-F'
+    args[#args + 1] = 'sl=' .. c.start_line
+  end
+  run(args, function(stdout, err)
+    cb(stdout ~= nil, err)
+  end)
+end
+
+--- Finalize a pending review with a verdict.
+---@param review_id string
+---@param event string APPROVE | COMMENT | REQUEST_CHANGES
+---@param body string|nil
+---@param cb fun(ok: boolean, err: string|nil)
+function M.submit_review(review_id, event, body, cb)
+  run({
+    'gh', 'api', 'graphql',
+    '-f', 'query=mutation($rid: ID!, $event: PullRequestReviewEvent!, $body: String) { submitPullRequestReview(input: {pullRequestReviewId: $rid, event: $event, body: $body}) { pullRequestReview { id } } }',
+    '-f', 'rid=' .. review_id,
+    '-f', 'event=' .. event,
+    '-f', 'body=' .. (body or ''),
+  }, function(stdout, err)
+    cb(stdout ~= nil, err)
+  end)
+end
+
 --- Immediate reply to an existing review comment.
 ---@param number integer
 ---@param comment_id integer databaseId of the thread's first comment

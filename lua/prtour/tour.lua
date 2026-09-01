@@ -281,7 +281,7 @@ function M.stop()
   if n == 0 then
     return teardown()
   end
-  local pr, sha = state.pr, state.sha
+  local pr, pr_id = state.pr, state.pr_id
   local noun = n == 1 and '1 unsubmitted comment' or (n .. ' unsubmitted comments')
   vim.ui.select({
     'Upload to GitHub as a pending review (finalize later)',
@@ -289,7 +289,7 @@ function M.stop()
     'Cancel — keep reviewing',
   }, { prompt = ('End tour: you have %s'):format(noun) }, function(_, idx)
     if idx == 1 then
-      comments.submit({ pr = pr, sha = sha }, function(ok, err)
+      comments.submit({ pr = pr, pr_id = pr_id }, function(ok, err)
         if not ok then
           return vim.notify('prtour: upload failed, tour kept open: ' .. err, vim.log.levels.ERROR)
         end
@@ -398,7 +398,11 @@ local function show_position()
   end
   local in_step = state.pos - state.step_start[entry.step] + 1
   local pct = ('%d%%'):format(math.floor(vim.tbl_count(state.visited) / #state.flat * 100 + 0.5))
-  local kicker = (' STEP %d/%d · HUNK %d/%d'):format(entry.step, #state.steps, in_step, #step.hunks)
+  local queued = require('prtour.comments').count()
+  local kicker = (' STEP %d/%d · HUNK %d/%d%s'):format(
+    entry.step, #state.steps, in_step, #step.hunks,
+    queued > 0 and (' · 💬 %d'):format(queued) or ''
+  )
   add { { '' } }
   add {
     { kicker, 'PrtourKicker' },
@@ -581,6 +585,13 @@ function M.active()
   return state ~= nil
 end
 
+--- Re-render the HUD (e.g. after the comment queue changes).
+function M.refresh()
+  if state and state.pos >= 1 then
+    show_position()
+  end
+end
+
 --- Table of contents: jump to any step.
 function M.outline()
   if not state then
@@ -623,7 +634,7 @@ function M.submit(kind)
     if body == nil then
       return
     end
-    comments.submit({ pr = state.pr, sha = state.sha, event = EVENTS[kind], body = body }, function(ok, err)
+    comments.submit({ pr = state.pr, pr_id = state.pr_id, event = EVENTS[kind], body = body }, function(ok, err)
       if not ok then
         return vim.notify('prtour: review submit failed: ' .. err, vim.log.levels.ERROR)
       end
