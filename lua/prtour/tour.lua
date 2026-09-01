@@ -93,9 +93,11 @@ function M.start(opts)
     by_id[h.id] = h
     per_file_left[h.file] = (per_file_left[h.file] or 0) + 1
   end
+  local step_start = {}
   for si, step in ipairs(opts.steps) do
     for _, id in ipairs(step.hunks) do
       flat[#flat + 1] = { id = id, step = si }
+      step_start[si] = step_start[si] or #flat
     end
   end
   state = {
@@ -111,6 +113,9 @@ function M.start(opts)
     pos = 0,
     visited = {},
     pending_viewed = {},
+    step_start = step_start,
+    started_at = os.time(),
+    beaten = {},
   }
   local gs = gitsigns()
   if gs then
@@ -144,6 +149,21 @@ function M.start(opts)
   vim.keymap.set('n', '<leader>gr', function()
     require('prtour.threads').reply_at_cursor(opts.pr)
   end, { desc = 'prtour: [R]eply to thread at cursor' })
+  vim.keymap.set('n', '<leader>go', M.outline, { desc = 'prtour: tour [O]utline' })
+  vim.keymap.set('n', '<leader>gd', function()
+    local gs = gitsigns()
+    if not gs then
+      return
+    end
+    -- diffthis silently fails until gitsigns has attached AND computed the
+    -- base-revision text (async after our change_base).
+    local ok, cache = pcall(require, 'gitsigns.cache')
+    local bcache = ok and cache.cache[vim.api.nvim_get_current_buf()] or nil
+    if ok and not (bcache and bcache.compare_text) then
+      return vim.notify('prtour: gitsigns still loading this file — try again in a moment', vim.log.levels.WARN)
+    end
+    gs.diffthis(state.base)
+  end, { desc = 'prtour: side-by-side [D]iff of current file' })
   require('prtour.comments').reset()
   require('prtour.gh').review_threads(opts.pr, function(list)
     if not (list and state and state.pr == opts.pr) then
@@ -215,6 +235,8 @@ local function teardown()
   pcall(vim.keymap.del, 'n', '<leader>gc')
   pcall(vim.keymap.del, 'x', '<leader>gc')
   pcall(vim.keymap.del, 'n', '<leader>gr')
+  pcall(vim.keymap.del, 'n', '<leader>go')
+  pcall(vim.keymap.del, 'n', '<leader>gd')
   require('prtour.threads').clear()
   for _, m in ipairs(saved_maps) do
     pcall(vim.fn.mapset, 'n', false, m)
@@ -328,6 +350,21 @@ local function track_visited(h)
   end
 end
 
+local function fg_of(group)
+  local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+  return ok and h.fg or nil
+end
+
+--- HUD palette, derived from the active colorscheme.
+local function define_hls()
+  vim.api.nvim_set_hl(0, 'PrtourKicker', { fg = fg_of 'Comment' })
+  vim.api.nvim_set_hl(0, 'PrtourTitle', { fg = fg_of 'Function', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourDim', { fg = fg_of 'NonText' })
+  vim.api.nvim_set_hl(0, 'PrtourKey', { fg = fg_of 'Special', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourBar', { fg = fg_of 'Function' })
+  vim.api.nvim_set_hl(0, 'PrtourNext', { fg = fg_of 'Comment', italic = true })
+end
+
 --- File identity + status in the winbar of the window showing the hunk.
 local function show_winbar()
   local h = state.by_id[state.flat[state.pos].id]
@@ -353,29 +390,70 @@ end
 local function show_position()
   local entry = state.flat[state.pos]
   local step = state.steps[entry.step]
-  local visited = vim.tbl_count(state.visited)
-  local width = 56
-  local title_lines = wrap_text(step.title, width)
-  local lines = {
-    ('hunk %d/%d · step %d/%d · PR #%d'):format(visited, #state.flat, entry.step, #state.steps, state.pr),
-  }
-  vim.list_extend(lines, title_lines)
-  if step.note and step.note ~= '' then
-    vim.list_extend(lines, wrap_text(step.note, width))
+  define_hls()
+  local width, wrapw = 58, 54
+  local rows = {}
+  local function add(segs)
+    rows[#rows + 1] = segs
   end
+  local in_step = state.pos - state.step_start[entry.step] + 1
+  local pct = ('%d%%'):format(math.floor(vim.tbl_count(state.visited) / #state.flat * 100 + 0.5))
+  local kicker = (' STEP %d/%d · HUNK %d/%d'):format(entry.step, #state.steps, in_step, #step.hunks)
+  add { { '' } }
+  add {
+    { kicker, 'PrtourKicker' },
+    { (' '):rep(math.max(1, width - vim.fn.strdisplaywidth(kicker) - #pct - 1)) },
+    { pct, 'PrtourKicker' },
+  }
+  add { { '' } }
+  for _, l in ipairs(wrap_text(step.title, wrapw)) do
+    add { { ' ' .. l, 'PrtourTitle' } }
+  end
+  if step.note and step.note ~= '' then
+    for _, l in ipairs(wrap_text(step.note, wrapw)) do
+      add { { ' ' .. l } }
+    end
+  end
+  add { { '' } }
+  local next_step = state.steps[entry.step + 1]
+  if next_step then
+    add { { vim.fn.strcharpart((' next → %s'):format(next_step.title), 0, width - 1), 'PrtourNext' } }
+  end
+  add { { ' ' .. ('─'):rep(width - 2), 'PrtourDim' } }
   local leader = vim.g.mapleader
   leader = (leader == nil or leader == '') and '\\' or leader == ' ' and '␣' or leader
-  lines[#lines + 1] = ('⏎ next · ⌫ prev · %sgc comment · %sgr reply · %sgq quit'):format(leader, leader, leader)
+  local function keyline(defs)
+    local segs = {}
+    for _, d in ipairs(defs) do
+      segs[#segs + 1] = { ' ' .. d[1], 'PrtourKey' }
+      segs[#segs + 1] = { ' ' .. d[2] .. ' ', 'PrtourDim' }
+    end
+    return segs
+  end
+  add(keyline { { '⏎', 'next' }, { '⌫', 'prev' }, { leader .. 'go', 'outline' }, { leader .. 'gd', 'split' } })
+  add(keyline { { leader .. 'gc', 'comment' }, { leader .. 'gr', 'reply' }, { leader .. 'gq', 'quit' } })
   if not (hud.buf and vim.api.nvim_buf_is_valid(hud.buf)) then
     hud.buf = vim.api.nvim_create_buf(false, true)
     vim.bo[hud.buf].bufhidden = 'hide'
   end
+  local lines, marks = {}, {}
+  for i, segs in ipairs(rows) do
+    local text = ''
+    for _, s in ipairs(segs) do
+      local from = #text
+      text = text .. s[1]
+      if s[2] then
+        marks[#marks + 1] = { i - 1, from, #text, s[2] }
+      end
+    end
+    lines[i] = text
+  end
   vim.api.nvim_buf_set_lines(hud.buf, 0, -1, false, lines)
   vim.api.nvim_buf_clear_namespace(hud.buf, ns, 0, -1)
   local hl = vim.hl or vim.highlight
-  hl.range(hud.buf, ns, 'Comment', { 0, 0 }, { 0, -1 })
-  hl.range(hud.buf, ns, 'Title', { 1, 0 }, { #title_lines, -1 })
-  hl.range(hud.buf, ns, 'NonText', { #lines - 1, 0 }, { #lines - 1, -1 })
+  for _, m in ipairs(marks) do
+    hl.range(hud.buf, ns, m[4], { m[1], m[2] }, { m[1], m[3] })
+  end
   local cfg = {
     relative = 'editor',
     anchor = 'NE',
@@ -387,12 +465,83 @@ local function show_position()
     border = 'rounded',
     focusable = false,
     zindex = 60,
+    title = (' PR #%d '):format(state.pr),
+    title_pos = 'left',
   }
   if hud.win and vim.api.nvim_win_is_valid(hud.win) then
     vim.api.nvim_win_set_config(hud.win, cfg)
   else
     hud.win = vim.api.nvim_open_win(hud.buf, false, cfg)
   end
+end
+
+local function step_complete(si)
+  for _, id in ipairs(state.steps[si].hunks) do
+    if not state.visited[id] then
+      return false
+    end
+  end
+  return true
+end
+
+local function steps_cleared()
+  local n = 0
+  for si in ipairs(state.steps) do
+    n = n + (step_complete(si) and 1 or 0)
+  end
+  return n
+end
+
+local function show_summary()
+  local elapsed = os.time() - (state.started_at or os.time())
+  local files = {}
+  for id in pairs(state.visited) do
+    files[state.by_id[id].file] = true
+  end
+  local lines = {
+    ('  Tour complete — PR #%d'):format(state.pr),
+    '',
+    ('  steps cleared    %d/%d'):format(steps_cleared(), #state.steps),
+    ('  hunks read       %d/%d'):format(vim.tbl_count(state.visited), #state.flat),
+    ('  files seen       %d'):format(vim.tbl_count(files)),
+    ('  comments queued  %d'):format(require('prtour.comments').count()),
+    ('  session time     %dm %02ds'):format(math.floor(elapsed / 60), elapsed % 60),
+    '',
+    '  (s)ubmit review · (q) close',
+  }
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = 'wipe'
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  local width = 40
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    row = math.max(1, math.floor((vim.o.lines - #lines) / 2) - 2),
+    col = math.floor((vim.o.columns - width) / 2),
+    width = width,
+    height = #lines,
+    style = 'minimal',
+    border = 'rounded',
+    title = ' prtour ',
+    title_pos = 'center',
+  })
+  local hl = vim.hl or vim.highlight
+  hl.range(buf, ns, 'Title', { 0, 0 }, { 0, -1 })
+  hl.range(buf, ns, 'NonText', { #lines - 1, 0 }, { #lines - 1, -1 })
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+  vim.keymap.set('n', 'q', close, { buffer = buf })
+  vim.keymap.set('n', '<Esc>', close, { buffer = buf })
+  vim.keymap.set('n', 's', function()
+    close()
+    vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
+      if kind then
+        M.submit(kind)
+      end
+    end)
+  end, { buffer = buf })
 end
 
 local function goto_pos(pos)
@@ -403,8 +552,9 @@ local function goto_pos(pos)
     return
   end
   if pos > #state.flat then
-    return vim.notify(('prtour: tour complete — %d hunks reviewed'):format(#state.flat))
+    return show_summary()
   end
+  local left = state.pos >= 1 and state.flat[state.pos].step or nil
   state.pos = pos
   local h = state.by_id[state.flat[pos].id]
   open_hunk(h)
@@ -412,6 +562,12 @@ local function goto_pos(pos)
   show_position()
   show_winbar()
   save_progress()
+  -- Completion beat when moving forward out of a fully-read step.
+  local entered = state.flat[pos].step
+  if left and entered > left and not state.beaten[left] and step_complete(left) then
+    state.beaten[left] = true
+    vim.notify(('prtour: ✓ %s — %d/%d steps cleared'):format(state.steps[left].title, steps_cleared(), #state.steps))
+  end
 end
 
 function M.next()
@@ -424,6 +580,31 @@ end
 
 function M.active()
   return state ~= nil
+end
+
+--- Table of contents: jump to any step.
+function M.outline()
+  if not state then
+    return vim.notify('prtour: no active tour', vim.log.levels.WARN)
+  end
+  local current = state.pos >= 1 and state.flat[state.pos].step or nil
+  local labels = {}
+  for si, step in ipairs(state.steps) do
+    local started = false
+    for _, id in ipairs(step.hunks) do
+      if state.visited[id] then
+        started = true
+        break
+      end
+    end
+    local status = si == current and '▶' or step_complete(si) and '✓' or started and '◐' or '·'
+    labels[#labels + 1] = ('%s %2d. %s  (%d hunks)'):format(status, si, step.title, #step.hunks)
+  end
+  vim.ui.select(labels, { prompt = 'PR tour outline — jump to step' }, function(_, idx)
+    if idx then
+      goto_pos(state.step_start[idx])
+    end
+  end)
 end
 
 local EVENTS = { approve = 'APPROVE', comment = 'COMMENT', ['request-changes'] = 'REQUEST_CHANGES', pending = nil }
