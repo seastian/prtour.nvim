@@ -707,6 +707,78 @@ function M.actions()
       end,
     }
   end
+  local h = state.pos >= 1 and state.by_id[state.flat[state.pos].id] or nil
+  if h then
+    items[#items + 1] = {
+      label = 'ask Claude about this hunk…',
+      fn = function()
+        vim.ui.input({ prompt = 'Ask Claude: ' }, function(q)
+          if not q or q == '' then
+            return
+          end
+          local p = require('prtour.progress').start 'Claude'
+          p:report 'thinking about your question'
+          require('prtour.claude').ask({
+            pr = state.pr,
+            file = h.file,
+            start_line = h.start_line,
+            line_count = h.line_count,
+            diff = table.concat(h.lines, '\n'),
+          }, q, function(answer, err)
+            if not answer then
+              return p:fail('ask failed: ' .. err)
+            end
+            p:finish()
+            require('prtour.claude').show_answer(q, answer)
+          end)
+        end)
+      end,
+    }
+    items[#items + 1] = {
+      label = 'send to Claude for changes…',
+      fn = function()
+        vim.ui.input({ prompt = 'Tell Claude what to change: ' }, function(req)
+          if not req or req == '' then
+            return
+          end
+          local claude = require('prtour.claude')
+          local msg = ('Reviewer feedback from a PR review (PR #%d):\n\nFile: %s (around line %d)\nRequest: %s\n\nHunk under discussion:\n%s\n\nPlease address this on the PR branch.'):format(
+            state.pr, h.file, h.start_line, req, table.concat(h.lines, '\n')
+          )
+          claude.panes(function(panes, err)
+            if not panes then
+              return vim.notify('prtour: ' .. err, vim.log.levels.ERROR)
+            end
+            if #panes == 0 then
+              return vim.notify('prtour: no tmux pane running Claude found', vim.log.levels.WARN)
+            end
+            local function send_to(pane)
+              claude.send(pane.id, msg, function(ok, err2)
+                if not ok then
+                  return vim.notify('prtour: ' .. err2, vim.log.levels.ERROR)
+                end
+                vim.notify('prtour: sent to Claude in ' .. pane.label)
+              end)
+            end
+            if #panes == 1 then
+              return send_to(panes[1])
+            end
+            vim.ui.select(
+              vim.tbl_map(function(pn)
+                return pn.label
+              end, panes),
+              { prompt = 'Send to which Claude pane?' },
+              function(_, idx)
+                if idx then
+                  send_to(panes[idx])
+                end
+              end
+            )
+          end)
+        end)
+      end,
+    }
+  end
   items[#items + 1] = { label = 'tour outline', hint = ld .. 'go', fn = M.outline }
   items[#items + 1] = {
     label = 'submit review…',
