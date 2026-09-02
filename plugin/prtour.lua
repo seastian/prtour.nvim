@@ -1,8 +1,14 @@
 vim.api.nvim_create_user_command('PrTour', function(cmd)
+  if cmd.fargs[1] == 'local' then
+    return require('prtour').start_local(cmd.fargs[2])
+  end
   require('prtour').start(tonumber(cmd.fargs[1]))
 end, {
-  nargs = '?',
-  desc = 'Review a GitHub PR as a guided tour (optional PR number)',
+  nargs = '*',
+  complete = function()
+    return { 'local' }
+  end,
+  desc = 'Review a PR (optional number) or local changes (:PrTour local [base])',
 })
 
 vim.api.nvim_create_user_command('PrTourStop', function()

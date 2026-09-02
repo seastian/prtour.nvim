@@ -17,6 +17,27 @@ function M.count()
   return #comments
 end
 
+function M.all()
+  return comments
+end
+
+--- Re-resolve comment lines from their extmarks: buffer edits made after
+--- queueing move the visible mark, and the stored line must follow it.
+function M.refresh_positions()
+  for _, c in ipairs(comments) do
+    if c.extmark_id and c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr) then
+      local pos = vim.api.nvim_buf_get_extmark_by_id(c.bufnr, ns, c.extmark_id, {})
+      if pos and pos[1] then
+        local new_line = pos[1] + 1
+        if c.start_line then
+          c.start_line = c.start_line + (new_line - c.line)
+        end
+        c.line = new_line
+      end
+    end
+  end
+end
+
 local function repo_relative(name)
   local top = vim.trim(vim.fn.system { 'git', 'rev-parse', '--show-toplevel' })
   if vim.startswith(name, top .. '/') then
@@ -182,6 +203,7 @@ end
 ---@param opts {pr: integer, pr_id: string|nil, event: string|nil, body: string|nil}
 ---@param cb fun(ok: boolean, err: string|nil)
 function M.submit(opts, cb)
+  M.refresh_positions()
   local gh = require('prtour.gh')
   local function with_review(review_id)
     local i = 0

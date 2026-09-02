@@ -5,9 +5,14 @@ local M = {}
 ---@param question string
 ---@param cb fun(answer: string|nil, err: string|nil)
 function M.ask(ctx, question, cb)
-  local cmd = vim.deepcopy(require('prtour').config.claude_cmd or { 'claude', '-p' })
+  local config = require('prtour').config
+  local cmd = vim.deepcopy(config.claude_cmd or { 'claude', '-p' })
   cmd[#cmd + 1] = 'You are assisting a code review in this repository. stdin has the hunk under review and a question. Answer concisely for an expert reviewer — a short paragraph, code only if essential. Read repository files if you need more context.'
   cmd[#cmd + 1] = '--allowedTools=Read,Grep,Glob'
+  local model = (config.models or {}).ask
+  if model then
+    cmd[#cmd + 1] = '--model=' .. model
+  end
   local last_line = ctx.start_line + math.max(ctx.line_count - 1, 0)
   local stdin = ('PR #%d — %s (around lines %d-%d)\n\nHunk diff:\n%s\n\nQuestion: %s'):format(
     ctx.pr, ctx.file, ctx.start_line, last_line, ctx.diff, question
@@ -74,6 +79,39 @@ function M.send(pane_id, text, cb)
         end)
       end, 200)
     end)
+  end)
+end
+
+--- Pick a Claude pane (auto when only one) and send the message.
+---@param msg string
+---@param cb fun(ok: boolean, err: string|nil, label: string|nil)
+function M.dispatch(msg, cb)
+  M.panes(function(panes, err)
+    if not panes then
+      return cb(false, err)
+    end
+    if #panes == 0 then
+      return cb(false, 'no tmux pane running Claude found')
+    end
+    local function send_to(pane)
+      M.send(pane.id, msg, function(ok, err2)
+        cb(ok, err2, pane.label)
+      end)
+    end
+    if #panes == 1 then
+      return send_to(panes[1])
+    end
+    vim.ui.select(
+      vim.tbl_map(function(pn)
+        return pn.label
+      end, panes),
+      { prompt = 'Send to which Claude pane?' },
+      function(_, idx)
+        if idx then
+          send_to(panes[idx])
+        end
+      end
+    )
   end)
 end
 

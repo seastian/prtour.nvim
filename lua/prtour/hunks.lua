@@ -42,7 +42,28 @@ function M.parse(diff)
       end
     end
   end
+  M.fingerprint(hunks)
   return hunks
+end
+
+--- Position-independent identity: same file + same change = same hash,
+--- so "seen" survives rebases, force-pushes and unrelated edits.
+--- Also derives change_line: start_line points at the hunk's leading
+--- CONTEXT lines (3 by default); the first +/- line is what to jump to.
+---@param hunks prtour.Hunk[]
+function M.fingerprint(hunks)
+  for _, h in ipairs(hunks) do
+    h.hash = vim.fn.sha256(h.file .. '\0' .. table.concat(h.lines, '\n'))
+    local offset = 0
+    for _, l in ipairs(h.lines) do
+      local c = l:sub(1, 1)
+      if c == '+' or c == '-' then
+        break
+      end
+      offset = offset + 1
+    end
+    h.change_line = h.start_line + offset
+  end
 end
 
 return M

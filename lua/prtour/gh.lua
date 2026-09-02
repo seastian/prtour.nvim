@@ -66,6 +66,29 @@ function M.diff(base, cb)
   run({ 'git', 'diff', '--no-color', '--no-ext-diff', base .. '...HEAD' }, cb)
 end
 
+--- Diff of the working tree (including index) against a commit.
+---@param base string
+---@param cb fun(diff: string|nil, err: string|nil)
+function M.diff_worktree(base, cb)
+  run({ 'git', 'diff', '--no-color', '--no-ext-diff', base }, cb)
+end
+
+--- Untracked (new, unstaged) files.
+---@param cb fun(paths: string[])
+function M.untracked(cb)
+  run({ 'git', 'ls-files', '--others', '--exclude-standard' }, function(stdout)
+    cb(stdout and vim.split(vim.trim(stdout), '\n', { trimempty = true }) or {})
+  end)
+end
+
+---@param ref string
+---@param cb fun(sha: string|nil, err: string|nil)
+function M.merge_base(ref, cb)
+  run({ 'git', 'merge-base', ref, 'HEAD' }, function(stdout, err)
+    cb(stdout and vim.trim(stdout) or nil, err)
+  end)
+end
+
 ---@param cb fun(sha: string|nil, err: string|nil)
 function M.head_sha(cb)
   run({ 'git', 'rev-parse', 'HEAD' }, function(stdout, err)

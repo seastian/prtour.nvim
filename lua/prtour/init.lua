@@ -5,8 +5,13 @@ M.config = {
   base = nil,
   -- Flip GitHub's per-file "Viewed" checkbox as files are fully visited.
   mark_viewed = true,
-  -- Command used to generate the reading order (instructions appended).
+  -- Command used for headless Claude calls (instructions appended).
   claude_cmd = { 'claude', '-p' },
+  -- Models per task; nil falls back to the CLI default.
+  models = {
+    manifest = 'claude-sonnet-5',
+    ask = 'claude-sonnet-5',
+  },
 }
 
 function M.setup(opts)
@@ -39,6 +44,156 @@ function M.start(pr_number)
       p:finish()
       M._pick(prs)
     end)
+  end)
+end
+
+--- Most recently touched unfinished review, from the progress cache.
+local function latest_unfinished()
+  local dir = vim.fn.stdpath 'cache' .. '/prtour'
+  local best, best_time
+  for _, path in ipairs(vim.fn.glob(dir .. '/progress-*.json', false, true)) do
+    local mtime = vim.fn.getftime(path)
+    if not best_time or mtime > best_time then
+      local f = io.open(path, 'r')
+      if f then
+        local ok, saved = pcall(vim.json.decode, f:read '*a')
+        f:close()
+        if
+          ok
+          and type(saved) == 'table'
+          and type(saved.resume) == 'table'
+          and saved.label
+          and tonumber(saved.total)
+          and tonumber(saved.pos)
+          and saved.pos < saved.total
+        then
+          best, best_time = saved, mtime
+        end
+      end
+    end
+  end
+  return best
+end
+
+--- One key for everything: context actions during a tour, launcher otherwise.
+function M.launcher()
+  local tour = require('prtour.tour')
+  if tour.active() then
+    return tour.actions()
+  end
+  local items = {}
+  local unfinished = latest_unfinished()
+  if unfinished then
+    items[#items + 1] = {
+      label = ('resume %s · hunk %d/%d'):format(unfinished.label, unfinished.pos, unfinished.total),
+      fn = function()
+        if unfinished.resume.kind == 'pr' then
+          M.start(unfinished.resume.pr)
+        else
+          M.start_local(unfinished.resume.base_arg)
+        end
+      end,
+    }
+  end
+  vim.list_extend(items, {
+    { label = 'review a GitHub PR…', hint = ':PrTour', fn = M.start },
+    {
+      label = 'review local changes (vs HEAD)',
+      hint = ':PrTour local',
+      fn = function()
+        M.start_local()
+      end,
+    },
+    {
+      label = 'review local changes vs the default branch',
+      hint = ':PrTour local master',
+      fn = function()
+        require('prtour.gh').default_base(function(base, err)
+          if not base then
+            return vim.notify('prtour: ' .. err, vim.log.levels.ERROR)
+          end
+          M.start_local(base)
+        end)
+      end,
+    },
+  })
+  require('prtour.menu').open(items)
+end
+
+--- Review local changes (no PR): working tree vs HEAD, or vs the merge-base
+--- of a given ref ('master', 'origin/master', ...).
+---@param base_arg string|nil
+function M.start_local(base_arg)
+  local gh = require('prtour.gh')
+  local p = require('prtour.progress').start 'Local review'
+  local function go(base, base_label)
+    p:report('diffing against ' .. base_label)
+    gh.diff_worktree(base, function(diff, err)
+      if not diff then
+        return p:fail('diff failed: ' .. err)
+      end
+      gh.untracked(function(untracked)
+        local hunks_mod = require('prtour.hunks')
+        local hunks = hunks_mod.parse(diff)
+        for _, path in ipairs(untracked) do
+          local ok, flines = pcall(vim.fn.readfile, path)
+          if ok and #flines > 0 then
+            local lines = {}
+            for _, l in ipairs(flines) do
+              lines[#lines + 1] = '+' .. l
+            end
+            hunks[#hunks + 1] = {
+              id = #hunks + 1,
+              file = path,
+              deleted = false,
+              added = true,
+              start_line = 1,
+              line_count = #flines,
+              lines = lines,
+            }
+          end
+        end
+        hunks_mod.fingerprint(hunks)
+        if #hunks == 0 then
+          return p:fail('no local changes vs ' .. base_label)
+        end
+        local branch = vim.trim(vim.fn.system { 'git', 'branch', '--show-current' })
+        branch = branch ~= '' and branch or 'detached'
+        local key = 'local-' .. branch:gsub('[^%w%-_]', '-')
+        local hashes = {}
+        for _, h in ipairs(hunks) do
+          hashes[#hashes + 1] = h.hash
+        end
+        local diff_hash = vim.fn.sha256(table.concat(hashes, ''))
+        require('prtour.manifest').get({
+          key = key,
+          sha = diff_hash,
+          hunks = hunks,
+          claude_cmd = M.config.claude_cmd,
+        }, p, function(steps, from_cache)
+          p:finish(('%d hunks in %d steps%s — <CR> to begin'):format(#hunks, #steps, from_cache and ' (cached)' or ''))
+          require('prtour.tour').start {
+            key = key,
+            label = branch .. ' (local)',
+            resume = { kind = 'local', base_arg = base_arg },
+            sha = diff_hash,
+            base = base,
+            hunks = hunks,
+            steps = steps,
+            mark_viewed = false,
+          }
+        end)
+      end)
+    end)
+  end
+  if not base_arg then
+    return go('HEAD', 'HEAD')
+  end
+  require('prtour.gh').merge_base(base_arg, function(mb, err)
+    if not mb then
+      return p:fail('merge-base failed: ' .. err)
+    end
+    go(mb, base_arg .. ' (merge-base)')
   end)
 end
 
@@ -155,6 +310,7 @@ function M._start_tour(number, base, hunks, p, pr_id)
         require('prtour.tour').start {
           pr = number,
           pr_id = pr_id,
+          resume = { kind = 'pr', pr = number },
           sha = sha,
           base = base,
           hunks = hunks,

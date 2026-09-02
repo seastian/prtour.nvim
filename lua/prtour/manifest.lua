@@ -19,10 +19,10 @@ Reply with ONLY a JSON object, no prose, no code fences:
 Every hunk id must appear exactly once across all steps.
 ]]
 
-local function cache_path(pr, sha)
+local function cache_path(key, sha)
   local dir = vim.fn.stdpath 'cache' .. '/prtour'
   vim.fn.mkdir(dir, 'p')
-  return ('%s/manifest-%d-%s.json'):format(dir, pr, sha)
+  return ('%s/manifest-%s-%s.json'):format(dir, key, sha)
 end
 
 ---@param hunks prtour.Hunk[]
@@ -96,11 +96,11 @@ local function validate(steps, hunks)
   return #out > 0 and out or nil
 end
 
----@param opts {pr: integer, sha: string, hunks: prtour.Hunk[], claude_cmd: string[]}
+---@param opts {key: string|integer, sha: string, hunks: prtour.Hunk[], claude_cmd: string[]}
 ---@param p prtour.Progress
 ---@param cb fun(steps: prtour.Step[], from_cache: boolean|nil)
 function M.get(opts, p, cb)
-  local path = cache_path(opts.pr, opts.sha)
+  local path = cache_path(tostring(opts.key or opts.pr), opts.sha)
   local f = io.open(path, 'r')
   if f then
     local ok, cached = pcall(vim.json.decode, f:read '*a')
@@ -113,6 +113,10 @@ function M.get(opts, p, cb)
   p:report 'asking Claude for a reading order (can take a minute)'
   local cmd = vim.deepcopy(opts.claude_cmd or { 'claude', '-p' })
   cmd[#cmd + 1] = INSTRUCTIONS
+  local model = (require('prtour').config.models or {}).manifest
+  if model then
+    cmd[#cmd + 1] = '--model=' .. model
+  end
   vim.system(cmd, { text = true, stdin = hunks_text(opts.hunks) }, function(out)
     vim.schedule(function()
       local steps

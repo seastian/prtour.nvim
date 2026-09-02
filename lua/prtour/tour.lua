@@ -27,30 +27,34 @@ local function wrap_text(text, width)
   return lines
 end
 
-local function progress_path(pr, sha)
+local function progress_path(key)
   local dir = vim.fn.stdpath 'cache' .. '/prtour'
   vim.fn.mkdir(dir, 'p')
-  return ('%s/progress-%d-%s.json'):format(dir, pr, sha)
+  return ('%s/progress-%s.json'):format(dir, key)
 end
 
 local function save_progress()
-  if not (state and state.sha) then
+  if not (state and state.key) then
     return
   end
-  local ids = vim.tbl_keys(state.visited)
-  table.sort(ids)
-  local f = io.open(progress_path(state.pr, state.sha), 'w')
+  local seen = vim.tbl_keys(state.seen)
+  table.sort(seen)
+  local f = io.open(progress_path(state.key), 'w')
   if f then
-    f:write(vim.json.encode { pos = state.pos, visited = ids })
+    f:write(vim.json.encode {
+      pos = state.pos,
+      sha = state.sha,
+      seen = seen,
+      label = state.label,
+      total = #state.flat,
+      resume = state.resume,
+    })
     f:close()
   end
 end
 
-local function load_progress(pr, sha)
-  if not sha then
-    return nil
-  end
-  local f = io.open(progress_path(pr, sha), 'r')
+local function load_progress(key)
+  local f = io.open(progress_path(key), 'r')
   if not f then
     return nil
   end
@@ -177,7 +181,11 @@ function M.start(opts)
   state = {
     pr = opts.pr,
     pr_id = opts.pr_id,
+    key = opts.key or tostring(opts.pr),
+    label = opts.label or ('PR #' .. tostring(opts.pr)),
+    resume = opts.resume,
     sha = opts.sha,
+    seen = {},
     base = opts.base,
     steps = opts.steps,
     mark_viewed = opts.mark_viewed,
@@ -233,9 +241,9 @@ function M.start(opts)
     end
   end, { desc = 'prtour: [E]dit/delete your comment at cursor' })
   vim.keymap.set('n', '<leader>gd', toggle_split, { desc = 'prtour: toggle side-by-side [D]iff' })
-  vim.keymap.set('n', '\\', M.actions, { desc = 'prtour: actions at cursor' })
   require('prtour.comments').reset()
-  require('prtour.gh').review_threads(opts.pr, function(list)
+  if opts.pr then
+    require('prtour.gh').review_threads(opts.pr, function(list)
     if not (list and state and state.pr == opts.pr) then
       return
     end
@@ -247,7 +255,8 @@ function M.start(opts)
         require('prtour.threads').decorate(vim.api.nvim_get_current_buf(), h.file)
       end
     end
-  end)
+    end)
+  end
   local function absorb_visited(id)
     local h = by_id[id]
     if h and not state.visited[id] then
@@ -265,14 +274,21 @@ function M.start(opts)
       absorb_visited(h.id)
     end
   end
-  -- Resume where the last session left off (progress is keyed by PR + head sha).
-  local saved = load_progress(opts.pr, opts.sha)
-  if saved and type(saved.visited) == 'table' then
-    for _, id in ipairs(saved.visited) do
-      absorb_visited(id)
+  -- Resume: seen-state is content-hashed, so it survives pushes, rebases
+  -- and unrelated edits — only genuinely changed hunks come back unseen.
+  local saved = load_progress(state.key)
+  if saved and type(saved.seen) == 'table' and #saved.seen < 20000 then
+    for _, hash in ipairs(saved.seen) do
+      state.seen[hash] = true
+    end
+    for _, h in ipairs(opts.hunks) do
+      if state.seen[h.hash] then
+        absorb_visited(h.id)
+      end
     end
   end
-  local pos = saved and tonumber(saved.pos)
+  -- Exact position only resumes for the same diff; otherwise the frontier rule applies.
+  local pos = saved and saved.sha == opts.sha and tonumber(saved.pos) or nil
   if not pos then
     -- No local progress: start on the last seen hunk, so <CR> enters new territory.
     local first_unvisited
@@ -297,6 +313,38 @@ function M.start(opts)
   M.next()
 end
 
+--- Local mode "submit": batch queued comments into one message to a Claude pane.
+---@param on_done fun()|nil
+local function local_send_comments(on_done)
+  local comments = require('prtour.comments')
+  if comments.count() == 0 then
+    return vim.notify('prtour: no queued comments to send', vim.log.levels.WARN)
+  end
+  comments.refresh_positions()
+  local parts = { ('Review feedback on %s:'):format(state.label), '' }
+  for i, c in ipairs(comments.all()) do
+    local loc = c.start_line and ('%d-%d'):format(c.start_line, c.line) or tostring(c.line)
+    parts[#parts + 1] = ('%d. %s:%s'):format(i, c.path, loc)
+    for _, bl in ipairs(vim.split(c.body, '\n')) do
+      parts[#parts + 1] = '   ' .. bl
+    end
+    parts[#parts + 1] = ''
+  end
+  parts[#parts + 1] = 'Please address these points on this branch.'
+  require('prtour.claude').dispatch(table.concat(parts, '\n'), function(ok, err, label)
+    if not ok then
+      return vim.notify('prtour: ' .. err, vim.log.levels.ERROR)
+    end
+    comments.reset()
+    vim.notify('prtour: feedback sent to Claude in ' .. label)
+    if on_done then
+      on_done()
+    else
+      M.refresh()
+    end
+  end)
+end
+
 local function teardown()
   pcall(vim.keymap.del, 'n', ']f')
   pcall(vim.keymap.del, 'n', '[f')
@@ -308,7 +356,6 @@ local function teardown()
   pcall(vim.keymap.del, 'n', '<leader>go')
   pcall(vim.keymap.del, 'n', '<leader>gd')
   pcall(vim.keymap.del, 'n', '<leader>ge')
-  pcall(vim.keymap.del, 'n', '\\')
   require('prtour.threads').clear()
   for _, m in ipairs(saved_maps) do
     pcall(vim.fn.mapset, 'n', false, m)
@@ -340,11 +387,14 @@ function M.stop()
   local pr, pr_id = state.pr, state.pr_id
   local noun = n == 1 and '1 unsubmitted comment' or (n .. ' unsubmitted comments')
   vim.ui.select({
-    'Upload to GitHub as a pending review (finalize later)',
+    pr and 'Upload to GitHub as a pending review (finalize later)' or 'Send the comments to a Claude pane',
     'Discard the comments',
     'Cancel — keep reviewing',
   }, { prompt = ('End tour: you have %s'):format(noun) }, function(_, idx)
     if idx == 1 then
+      if not pr then
+        return local_send_comments(teardown)
+      end
       comments.submit({ pr = pr, pr_id = pr_id }, function(ok, err)
         if not ok then
           return vim.notify('prtour: upload failed, tour kept open: ' .. err, vim.log.levels.ERROR)
@@ -378,7 +428,8 @@ local function open_hunk(h)
     vim.cmd.edit(vim.fn.fnameescape(h.file))
   end
   local last = vim.api.nvim_buf_line_count(0)
-  vim.api.nvim_win_set_cursor(0, { math.min(h.start_line, last), 0 })
+  local target = math.min(h.change_line or h.start_line, last)
+  vim.api.nvim_win_set_cursor(0, { target, 0 })
   vim.cmd 'normal! zz'
   require('prtour.threads').decorate(vim.api.nvim_get_current_buf(), h.file)
   -- Transient arrival badges at the hunk's first line; cleared on next jump.
@@ -398,7 +449,7 @@ local function open_hunk(h)
   if #badges > 0 then
     define_hls()
     local buf = vim.api.nvim_get_current_buf()
-    pcall(vim.api.nvim_buf_set_extmark, buf, ns, math.min(h.start_line, last) - 1, 0, {
+    pcall(vim.api.nvim_buf_set_extmark, buf, ns, target - 1, 0, {
       virt_text = badges,
       virt_text_pos = 'eol',
     })
@@ -433,6 +484,7 @@ local function track_visited(h)
     return
   end
   state.visited[h.id] = true
+  state.seen[h.hash] = true
   state.per_file_left[h.file] = state.per_file_left[h.file] - 1
   if state.per_file_left[h.file] == 0 and state.mark_viewed then
     if state.pr_id then
@@ -519,7 +571,7 @@ local function show_position()
     border = 'rounded',
     focusable = false,
     zindex = 60,
-    title = (' PR #%d '):format(state.pr),
+    title = (' %s '):format(state.label),
     title_pos = 'left',
   }
   if hud.win and vim.api.nvim_win_is_valid(hud.win) then
@@ -553,7 +605,7 @@ local function show_summary()
     files[state.by_id[id].file] = true
   end
   local lines = {
-    ('  Tour complete — PR #%d'):format(state.pr),
+    ('  Tour complete — %s'):format(state.label),
     '',
     ('  steps cleared    %d/%d'):format(steps_cleared(), #state.steps),
     ('  hunks read       %d/%d'):format(vim.tbl_count(state.visited), #state.flat),
@@ -590,6 +642,9 @@ local function show_summary()
   vim.keymap.set('n', '<Esc>', close, { buffer = buf })
   vim.keymap.set('n', 's', function()
     close()
+    if not state.pr then
+      return M.submit()
+    end
     vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
       if kind then
         M.submit(kind)
@@ -694,18 +749,23 @@ function M.actions()
     items[#items + 1] = { label = 'side-by-side diff', hint = ld .. 'gd', fn = open_split }
   end
   if comments.count() > 0 then
-    items[#items + 1] = {
-      label = ('save %d queued comment%s to GitHub'):format(comments.count(), comments.count() == 1 and '' or 's'),
-      fn = function()
-        comments.submit({ pr = state.pr, pr_id = state.pr_id }, function(ok, err)
-          if not ok then
-            return vim.notify('prtour: save failed: ' .. err, vim.log.levels.ERROR)
-          end
-          vim.notify 'prtour: comments saved to pending review'
-          M.refresh()
-        end)
-      end,
-    }
+    local noun = ('%d queued comment%s'):format(comments.count(), comments.count() == 1 and '' or 's')
+    if state.pr then
+      items[#items + 1] = {
+        label = 'save ' .. noun .. ' to GitHub',
+        fn = function()
+          comments.submit({ pr = state.pr, pr_id = state.pr_id }, function(ok, err)
+            if not ok then
+              return vim.notify('prtour: save failed: ' .. err, vim.log.levels.ERROR)
+            end
+            vim.notify 'prtour: comments saved to pending review'
+            M.refresh()
+          end)
+        end,
+      }
+    else
+      items[#items + 1] = { label = 'send ' .. noun .. ' to Claude', fn = local_send_comments }
+    end
   end
   local h = state.pos >= 1 and state.by_id[state.flat[state.pos].id] or nil
   if h then
@@ -742,54 +802,32 @@ function M.actions()
             return
           end
           local claude = require('prtour.claude')
-          local msg = ('Reviewer feedback from a PR review (PR #%d):\n\nFile: %s (around line %d)\nRequest: %s\n\nHunk under discussion:\n%s\n\nPlease address this on the PR branch.'):format(
-            state.pr, h.file, h.start_line, req, table.concat(h.lines, '\n')
+          local msg = ('Reviewer feedback from a code review (%s):\n\nFile: %s (around line %d)\nRequest: %s\n\nHunk under discussion:\n%s\n\nPlease address this on this branch.'):format(
+            state.label, h.file, h.start_line, req, table.concat(h.lines, '\n')
           )
-          claude.panes(function(panes, err)
-            if not panes then
+          claude.dispatch(msg, function(ok, err, label)
+            if not ok then
               return vim.notify('prtour: ' .. err, vim.log.levels.ERROR)
             end
-            if #panes == 0 then
-              return vim.notify('prtour: no tmux pane running Claude found', vim.log.levels.WARN)
-            end
-            local function send_to(pane)
-              claude.send(pane.id, msg, function(ok, err2)
-                if not ok then
-                  return vim.notify('prtour: ' .. err2, vim.log.levels.ERROR)
-                end
-                vim.notify('prtour: sent to Claude in ' .. pane.label)
-              end)
-            end
-            if #panes == 1 then
-              return send_to(panes[1])
-            end
-            vim.ui.select(
-              vim.tbl_map(function(pn)
-                return pn.label
-              end, panes),
-              { prompt = 'Send to which Claude pane?' },
-              function(_, idx)
-                if idx then
-                  send_to(panes[idx])
-                end
-              end
-            )
+            vim.notify('prtour: sent to Claude in ' .. label)
           end)
         end)
       end,
     }
   end
   items[#items + 1] = { label = 'tour outline', hint = ld .. 'go', fn = M.outline }
-  items[#items + 1] = {
-    label = 'submit review…',
-    fn = function()
-      vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
-        if kind then
-          M.submit(kind)
-        end
-      end)
-    end,
-  }
+  if state.pr then
+    items[#items + 1] = {
+      label = 'submit review…',
+      fn = function()
+        vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
+          if kind then
+            M.submit(kind)
+          end
+        end)
+      end,
+    }
+  end
   items[#items + 1] = { label = 'quit tour', hint = ld .. 'gq', fn = M.stop }
   require('prtour.menu').open(items)
 end
@@ -826,6 +864,9 @@ local EVENTS = { approve = 'APPROVE', comment = 'COMMENT', ['request-changes'] =
 function M.submit(kind)
   if not state then
     return vim.notify('prtour: no active tour', vim.log.levels.WARN)
+  end
+  if not state.pr then
+    return local_send_comments()
   end
   kind = kind and kind ~= '' and kind or 'comment'
   if kind ~= 'pending' and EVENTS[kind] == nil and kind ~= 'comment' then

@@ -3,11 +3,26 @@ local M = {}
 
 local ns = vim.api.nvim_create_namespace 'prtour-menu'
 
+--- The menu can open before any tour has defined the Prtour* groups.
+local function ensure_hls()
+  local function fg(group)
+    local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+    return ok and h.fg or nil
+  end
+  if vim.fn.hlexists 'PrtourKey' == 0 then
+    vim.api.nvim_set_hl(0, 'PrtourKey', { fg = fg 'Special', bold = true })
+  end
+  if vim.fn.hlexists 'PrtourDim' == 0 then
+    vim.api.nvim_set_hl(0, 'PrtourDim', { fg = fg 'NonText' })
+  end
+end
+
 ---@param items {label: string, hint: string|nil, fn: function}[]
 function M.open(items)
   if #items == 0 then
     return
   end
+  ensure_hls()
   local width = 30
   local rows = {}
   for i, it in ipairs(items) do
