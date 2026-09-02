@@ -107,9 +107,8 @@ function M.add(start_line, end_line)
   vim.cmd 'startinsert'
 end
 
---- Edit or delete the queued comment under the cursor.
----@return boolean handled false when no queued comment is here
-function M.edit_at_cursor()
+---@return integer|nil idx, table|nil comment
+local function find_at_cursor()
   local path = target_for_current_buf()
   local lnum = vim.api.nvim_win_get_cursor(0)[1]
   local idx, c
@@ -118,6 +117,17 @@ function M.edit_at_cursor()
       idx, c = i, cc
     end
   end
+  return idx, c
+end
+
+function M.has_at_cursor()
+  return (find_at_cursor()) ~= nil
+end
+
+--- Edit or delete the queued comment under the cursor.
+---@return boolean handled false when no queued comment is here
+function M.edit_at_cursor()
+  local idx, c = find_at_cursor()
   if not c then
     return false
   end

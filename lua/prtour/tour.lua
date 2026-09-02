@@ -71,6 +71,11 @@ local function fg_of(group)
   return ok and h.fg or nil
 end
 
+local function leader_disp()
+  local l = vim.g.mapleader
+  return (l == nil or l == '') and '\\' or l == ' ' and '␣' or l
+end
+
 --- HUD palette, derived from the active colorscheme.
 local function define_hls()
   vim.api.nvim_set_hl(0, 'PrtourKicker', { fg = fg_of 'Comment' })
@@ -100,6 +105,59 @@ end
 local function gitsigns()
   local ok, gs = pcall(require, 'gitsigns')
   return ok and gs or nil
+end
+
+--- Side-by-side vimdiff of the current file against the tour base.
+local function open_split(retries)
+  local gs = gitsigns()
+  if not (gs and state) then
+    return
+  end
+  local h = state.pos >= 1 and state.by_id[state.flat[state.pos].id] or nil
+  if h and h.added then
+    return vim.notify('prtour: file is new in this PR — no base version to diff against', vim.log.levels.INFO)
+  end
+  -- diffthis silently fails until gitsigns has attached AND computed the
+  -- base-revision text (async after our change_base); retry until it's ready.
+  local buf = vim.api.nvim_get_current_buf()
+  local ok, cache = pcall(require, 'gitsigns.cache')
+  local bcache = ok and cache.cache[buf] or nil
+  if ok and not (bcache and bcache.compare_text) then
+    retries = retries or 0
+    if retries >= 25 then
+      return vim.notify('prtour: gitsigns could not load this file (not tracked at the base?)', vim.log.levels.WARN)
+    end
+    return vim.defer_fn(function()
+      if state and vim.api.nvim_get_current_buf() == buf then
+        open_split(retries + 1)
+      end
+    end, 200)
+  end
+  gs.diffthis(state.base)
+end
+
+--- Close the gitsigns base-version window; diff mode resets automatically.
+local function close_split()
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
+    if name:match '^gitsigns://' then
+      vim.api.nvim_win_close(w, true)
+      return
+    end
+  end
+  vim.cmd 'diffoff!'
+end
+
+local function in_split()
+  return vim.wo.diff
+end
+
+local function toggle_split()
+  if in_split() then
+    close_split()
+  else
+    open_split()
+  end
 end
 
 ---@param opts {pr: integer, pr_id: string|nil, base: string, hunks: prtour.Hunk[], steps: prtour.Step[], mark_viewed: boolean}
@@ -174,20 +232,8 @@ function M.start(opts)
       vim.notify('prtour: no comment of yours at this line', vim.log.levels.WARN)
     end
   end, { desc = 'prtour: [E]dit/delete your comment at cursor' })
-  vim.keymap.set('n', '<leader>gd', function()
-    local gs = gitsigns()
-    if not gs then
-      return
-    end
-    -- diffthis silently fails until gitsigns has attached AND computed the
-    -- base-revision text (async after our change_base).
-    local ok, cache = pcall(require, 'gitsigns.cache')
-    local bcache = ok and cache.cache[vim.api.nvim_get_current_buf()] or nil
-    if ok and not (bcache and bcache.compare_text) then
-      return vim.notify('prtour: gitsigns still loading this file — try again in a moment', vim.log.levels.WARN)
-    end
-    gs.diffthis(state.base)
-  end, { desc = 'prtour: side-by-side [D]iff of current file' })
+  vim.keymap.set('n', '<leader>gd', toggle_split, { desc = 'prtour: toggle side-by-side [D]iff' })
+  vim.keymap.set('n', '\\', M.actions, { desc = 'prtour: actions at cursor' })
   require('prtour.comments').reset()
   require('prtour.gh').review_threads(opts.pr, function(list)
     if not (list and state and state.pr == opts.pr) then
@@ -262,6 +308,7 @@ local function teardown()
   pcall(vim.keymap.del, 'n', '<leader>go')
   pcall(vim.keymap.del, 'n', '<leader>gd')
   pcall(vim.keymap.del, 'n', '<leader>ge')
+  pcall(vim.keymap.del, 'n', '\\')
   require('prtour.threads').clear()
   for _, m in ipairs(saved_maps) do
     pcall(vim.fn.mapset, 'n', false, m)
@@ -433,18 +480,12 @@ local function show_position()
     add { { vim.fn.strcharpart((' next → %s'):format(next_step.title), 0, width - 1), 'PrtourNext' } }
   end
   add { { ' ' .. ('─'):rep(width - 2), 'PrtourDim' } }
-  local leader = vim.g.mapleader
-  leader = (leader == nil or leader == '') and '\\' or leader == ' ' and '␣' or leader
-  local function keyline(defs)
-    local segs = {}
-    for _, d in ipairs(defs) do
-      segs[#segs + 1] = { ' ' .. d[1], 'PrtourKey' }
-      segs[#segs + 1] = { ' ' .. d[2] .. ' ', 'PrtourDim' }
-    end
-    return segs
+  local segs = {}
+  for _, d in ipairs { { '⏎', 'next' }, { '⌫', 'prev' }, { '\\', 'actions' } } do
+    segs[#segs + 1] = { ' ' .. d[1], 'PrtourKey' }
+    segs[#segs + 1] = { ' ' .. d[2] .. ' ', 'PrtourDim' }
   end
-  add(keyline { { '⏎', 'next' }, { '⌫', 'prev' }, { leader .. 'go', 'outline' }, { leader .. 'gd', 'split' } })
-  add(keyline { { leader .. 'gc', 'comment' }, { leader .. 'ge', 'edit' }, { leader .. 'gr', 'reply' }, { leader .. 'gq', 'quit' } })
+  add(segs)
   if not (hud.buf and vim.api.nvim_buf_is_valid(hud.buf)) then
     hud.buf = vim.api.nvim_create_buf(false, true)
     vim.bo[hud.buf].bufhidden = 'hide'
@@ -599,6 +640,86 @@ function M.refresh()
   if state and state.pos >= 1 then
     show_position()
   end
+end
+
+--- Context menu: only the actions that apply at the cursor.
+function M.actions()
+  if not state then
+    return
+  end
+  local comments = require('prtour.comments')
+  local threads = require('prtour.threads')
+  local ld = leader_disp()
+  local items = {}
+  if comments.has_at_cursor() then
+    items[#items + 1] = {
+      label = 'edit / delete queued comment',
+      hint = ld .. 'ge',
+      fn = function()
+        comments.edit_at_cursor()
+      end,
+    }
+  end
+  local at = threads.at_cursor_info()
+  if at.own then
+    items[#items + 1] = {
+      label = 'edit / delete your GitHub comment',
+      fn = function()
+        threads.edit_own_at_cursor()
+      end,
+    }
+  end
+  if at.thread then
+    items[#items + 1] = {
+      label = 'reply to thread',
+      hint = ld .. 'gr',
+      fn = function()
+        threads.reply_at_cursor(state.pr)
+      end,
+    }
+  end
+  if not comments.has_at_cursor() then
+    items[#items + 1] = {
+      label = 'comment on this line',
+      hint = ld .. 'gc',
+      fn = function()
+        local line = vim.api.nvim_win_get_cursor(0)[1]
+        comments.add(line, line)
+      end,
+    }
+  end
+  if in_split() then
+    items[#items + 1] = { label = 'close side-by-side diff', hint = ld .. 'gd', fn = close_split }
+  else
+    items[#items + 1] = { label = 'side-by-side diff', hint = ld .. 'gd', fn = open_split }
+  end
+  if comments.count() > 0 then
+    items[#items + 1] = {
+      label = ('save %d queued comment%s to GitHub'):format(comments.count(), comments.count() == 1 and '' or 's'),
+      fn = function()
+        comments.submit({ pr = state.pr, pr_id = state.pr_id }, function(ok, err)
+          if not ok then
+            return vim.notify('prtour: save failed: ' .. err, vim.log.levels.ERROR)
+          end
+          vim.notify 'prtour: comments saved to pending review'
+          M.refresh()
+        end)
+      end,
+    }
+  end
+  items[#items + 1] = { label = 'tour outline', hint = ld .. 'go', fn = M.outline }
+  items[#items + 1] = {
+    label = 'submit review…',
+    fn = function()
+      vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
+        if kind then
+          M.submit(kind)
+        end
+      end)
+    end,
+  }
+  items[#items + 1] = { label = 'quit tour', hint = ld .. 'gq', fn = M.stop }
+  require('prtour.menu').open(items)
 end
 
 --- Table of contents: jump to any step.

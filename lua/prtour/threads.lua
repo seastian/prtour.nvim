@@ -64,6 +64,22 @@ local function thread_at_cursor()
   return best, path, name
 end
 
+--- What exists at the cursor line: a thread, and any comment of the viewer's.
+---@return {thread: boolean, own: boolean}
+function M.at_cursor_info()
+  local best = thread_at_cursor()
+  local own = false
+  if best then
+    for _, c in ipairs(best.comments) do
+      if c.mine and c.id then
+        own = true
+        break
+      end
+    end
+  end
+  return { thread = best ~= nil, own = own }
+end
+
 --- Edit or delete the viewer's own comment in the thread at the cursor.
 ---@return boolean handled false when no own comment is here
 function M.edit_own_at_cursor()
