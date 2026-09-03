@@ -58,86 +58,23 @@ function M.start(pr_number)
 end
 
 --- Cache keys are scoped per repo: PR numbers and branch names collide
---- across repositories.
-local function repo_slug()
+--- across repositories. Exposed so the dashboard scopes to the same slug.
+function M.repo_slug()
   local top = vim.trim(vim.fn.system { 'git', 'rev-parse', '--show-toplevel' })
   if vim.v.shell_error ~= 0 or top == '' then
     return 'norepo'
   end
   return vim.fn.fnamemodify(top, ':t'):gsub('[^%w%-_]', '-') .. '-' .. vim.fn.sha256(top):sub(1, 4)
 end
+local repo_slug = M.repo_slug
 
---- Most recently touched unfinished review in THIS repo.
-local function latest_unfinished()
-  local dir = vim.fn.stdpath 'cache' .. '/prtour'
-  local best, best_time
-  for _, path in ipairs(vim.fn.glob(dir .. '/progress-' .. repo_slug() .. '-*.json', false, true)) do
-    local mtime = vim.fn.getftime(path)
-    if not best_time or mtime > best_time then
-      local f = io.open(path, 'r')
-      if f then
-        local ok, saved = pcall(vim.json.decode, f:read '*a')
-        f:close()
-        if
-          ok
-          and type(saved) == 'table'
-          and type(saved.resume) == 'table'
-          and saved.label
-          and tonumber(saved.total)
-          and tonumber(saved.pos)
-          and saved.pos < saved.total
-        then
-          best, best_time = saved, mtime
-        end
-      end
-    end
-  end
-  return best
-end
-
---- One key for everything: context actions during a tour, launcher otherwise.
+--- One key for everything: context actions during a tour, dashboard otherwise.
 function M.launcher()
   local tour = require('prtour.tour')
   if tour.active() then
     return tour.actions()
   end
-  local items = {}
-  local unfinished = latest_unfinished()
-  if unfinished then
-    items[#items + 1] = {
-      label = ('resume %s · hunk %d/%d'):format(unfinished.label, unfinished.pos, unfinished.total),
-      fn = function()
-        if unfinished.resume.kind == 'pr' then
-          M.start(unfinished.resume.pr)
-        else
-          M.start_local(unfinished.resume.base_arg)
-        end
-      end,
-    }
-  end
-  vim.list_extend(items, {
-    { label = 'review a GitHub PR…', hint = ':PrTour', fn = M.start },
-    {
-      label = 'review local changes (vs HEAD)',
-      hint = ':PrTour local',
-      fn = function()
-        M.start_local()
-      end,
-    },
-    {
-      label = 'review local changes vs the default branch',
-      hint = ':PrTour local master',
-      fn = function()
-        require('prtour.gh').default_base(function(base, err)
-          if not base then
-            return vim.notify('prtour: ' .. err, vim.log.levels.ERROR)
-          end
-          M.start_local(base)
-        end)
-      end,
-    },
-  })
-  require('prtour.menu').open(items)
+  require('prtour.dashboard').open()
 end
 
 --- Review local changes (no PR): working tree vs HEAD, or vs the merge-base

@@ -8,7 +8,7 @@ Instead of walking a PR file-by-file in alphabetical order, prtour asks Claude C
 
 `\`
 
-- **Outside a tour** it opens the launcher: resume an unfinished review, pick an open PR, or review local changes.
+- **Outside a tour** it opens the dashboard: a full-window view of this repo's unfinished tours to **resume** and fresh tours to **start** (open PRs, plus a local-review card). Resume and the local card show instantly; open PRs stream in under a spinner. Number keys `1`–`9` or `j`/`k`+Enter select; `r` refreshes; `q`/`Esc`/`\` close.
 - **Inside a tour** it opens a context menu showing only the actions that apply where your cursor is.
 
 During a tour: **Enter** = next hunk, **Backspace** = previous hunk. That's everything you need to remember.
