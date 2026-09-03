@@ -34,26 +34,14 @@ end
 
 --- Entry point: pick a PR (or use the given number) and start reviewing it.
 ---@param pr_number integer|nil
+---@param pr_number integer
 function M.start(pr_number)
   local gh = require('prtour.gh')
   gh.is_dirty(function(dirty)
     if dirty then
       return notify('working tree has uncommitted changes — commit or stash first', vim.log.levels.ERROR)
     end
-    if pr_number then
-      return M._checkout(pr_number)
-    end
-    local p = require('prtour.progress').start 'Fetching open PRs'
-    gh.list_prs(function(prs, err)
-      if not prs then
-        return p:fail(err)
-      end
-      if #prs == 0 then
-        return p:fail 'no open PRs'
-      end
-      p:finish()
-      M._pick(prs)
-    end)
+    M._checkout(pr_number)
   end)
 end
 
@@ -159,57 +147,6 @@ function M.start_local(base_arg, sopts)
     end
     go(mb, base_arg .. ' (merge-base)')
   end)
-end
-
---- ✓ all checks green, ✗ any failed, ● running, blank when no CI.
-local function ci_icon(rollup)
-  if type(rollup) ~= 'table' or #rollup == 0 then
-    return ' '
-  end
-  local failed, pending = false, false
-  for _, c in ipairs(rollup) do
-    local s = c.conclusion
-    if s == nil or s == vim.NIL or s == '' then
-      s = c.state or c.status or ''
-    end
-    s = tostring(s):upper()
-    if s == 'FAILURE' or s == 'ERROR' or s == 'TIMED_OUT' or s == 'CANCELLED' then
-      failed = true
-    elseif s ~= 'SUCCESS' and s ~= 'NEUTRAL' and s ~= 'SKIPPED' and s ~= 'COMPLETED' then
-      pending = true
-    end
-  end
-  return failed and '✗' or pending and '●' or '✓'
-end
-
----@param prs table[]
-function M._pick(prs)
-  local entries, by_line = {}, {}
-  for _, pr in ipairs(prs) do
-    local line = string.format(
-      '%s #%-5d %s%s  (+%d -%d, %s)',
-      ci_icon(pr.statusCheckRollup),
-      pr.number,
-      pr.isDraft and '[draft] ' or '',
-      pr.title,
-      pr.additions,
-      pr.deletions,
-      pr.author.login
-    )
-    entries[#entries + 1] = line
-    by_line[line] = pr
-  end
-  require('fzf-lua').fzf_exec(entries, {
-    prompt = 'Review PR> ',
-    actions = {
-      ['default'] = function(selected)
-        local pr = selected and by_line[selected[1]]
-        if pr then
-          M._checkout(pr.number)
-        end
-      end,
-    },
-  })
 end
 
 ---@param number integer
