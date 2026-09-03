@@ -164,13 +164,20 @@ describe('dashboard model — resume list', function()
 end)
 
 describe('dashboard model — start section', function()
-  it('passes the open-PR list straight through', function()
+  it('carries the open PRs\' display fields through, unflagged by default', function()
     local prs = {
-      { number = 3, title = 'Add widget', author = { login = 'ann' } },
-      { number = 5, title = 'Fix bug', author = { login = 'bob' } },
+      { number = 3, title = 'Add widget', author = { login = 'ann' }, additions = 3, deletions = 1 },
+      { number = 5, title = 'Fix bug', author = { login = 'bob' }, additions = 2, deletions = 0 },
     }
     local m = build { prs = prs }
-    eq(m.start.prs, prs)
+    eq(#m.start.prs, 2)
+    eq(m.start.prs[1].number, 3)
+    eq(m.start.prs[1].title, 'Add widget')
+    eq(m.start.prs[1].author, { login = 'ann' })
+    -- A clean tree with no matching local review leaves both flags off.
+    eq(m.start.prs[1].reviewed_locally, false)
+    eq(m.start.prs[1].disabled, false)
+    eq(m.start.prs[1].hint, nil)
     eq(m.loading, false)
   end)
 
@@ -197,5 +204,120 @@ describe('dashboard model — start section', function()
     eq(m.start.local_card.base, 'origin/main')
     eq(m.start.local_card.base_arg, 'origin/main')
     eq(m.start.local_card.dirty, false)
+  end)
+end)
+
+describe('dashboard model — Start polish (dedupe, tags, dirty)', function()
+  --- A `gh`-shaped open PR with sensible defaults.
+  local function pr(over)
+    local p = {
+      number = 3,
+      title = 'Add widget',
+      author = { login = 'ann' },
+      headRefName = 'feat/widget',
+      additions = 3,
+      deletions = 1,
+    }
+    for k, v in pairs(over or {}) do
+      p[k] = v
+    end
+    return p
+  end
+
+  --- The start PR entry for a given number, or nil.
+  local function start_pr(m, number)
+    for _, e in ipairs(m.start.prs) do
+      if e.number == number then
+        return e
+      end
+    end
+  end
+
+  it('dedupes a PR that already has an unfinished tour out of Start', function()
+    -- PR #3 has an unfinished tour (in Resume); PR #5 does not.
+    local m = build {
+      records = { record { key = SLUG .. '-pr-3', resume = { kind = 'pr', pr = 3 }, seen = { 'a' }, total = 4 } },
+      prs = { pr { number = 3 }, pr { number = 5 } },
+    }
+    -- It still resumes, but no longer offers a fresh start for #3.
+    eq(by_key(m.resume, SLUG .. '-pr-3').resume, { kind = 'pr', pr = 3 })
+    ok(start_pr(m, 3) == nil, 'resumed PR #3 dropped from Start')
+    ok(start_pr(m, 5) ~= nil, 'PR #5 without a tour stays in Start')
+  end)
+
+  it('dedupes a PR whose unfinished tour has aged past the Resume cap', function()
+    -- Ten fresher unfinished local tours push PR #3's older tour off the capped
+    -- Resume display, but it's still in flight — Start must not re-offer it.
+    local records = { record { key = SLUG .. '-pr-3', resume = { kind = 'pr', pr = 3 }, seen = { 'a' }, total = 4, last_touched = 1 } }
+    for i = 1, 10 do
+      records[#records + 1] = record {
+        key = SLUG .. '-local-branch' .. i,
+        resume = { kind = 'local' },
+        seen = { 'a' },
+        total = 4,
+        last_touched = 100 + i,
+      }
+    end
+    local m = build { records = records, prs = { pr { number = 3 } } }
+    eq(#m.resume, 10) -- PR #3's tour aged out of the displayed list
+    ok(by_key(m.resume, SLUG .. '-pr-3') == nil, 'PR #3 not shown in Resume (capped)')
+    ok(start_pr(m, 3) == nil, 'yet still deduped out of Start')
+  end)
+
+  it('keeps a PR in Start once its tour is complete (not in Resume)', function()
+    -- PR #3's tour is fully walked, so it isn't in Resume; Start should show it.
+    local m = build {
+      records = { record { key = SLUG .. '-pr-3', resume = { kind = 'pr', pr = 3 }, seen = { 'a', 'b', 'c', 'd' }, total = 4 } },
+      prs = { pr { number = 3 } },
+    }
+    eq(#m.resume, 0)
+    ok(start_pr(m, 3) ~= nil, 'a completed PR tour still appears in Start')
+  end)
+
+  it('tags a PR whose head branch matches a prior local review', function()
+    -- A local review of branch `feat/widget` was saved under the sanitized key.
+    local m = build {
+      records = { record { key = SLUG .. '-local-feat-widget', label = 'feat/widget (local)', resume = { kind = 'local' }, seen = { 'x' }, total = 3 } },
+      prs = { pr { number = 3, headRefName = 'feat/widget' } },
+    }
+    eq(start_pr(m, 3).reviewed_locally, true)
+  end)
+
+  it('does not tag a PR with no matching local review', function()
+    local m = build {
+      records = { record { key = SLUG .. '-local-something-else', resume = { kind = 'local' }, seen = { 'x' }, total = 3 } },
+      prs = { pr { number = 3, headRefName = 'feat/widget' } },
+    }
+    eq(start_pr(m, 3).reviewed_locally, false)
+  end)
+
+  it('matches even a completed local review (any prior review counts)', function()
+    local m = build {
+      records = { record { key = SLUG .. '-local-feat-widget', resume = { kind = 'local' }, seen = { 'x', 'y', 'z' }, total = 3 } },
+      prs = { pr { number = 3, headRefName = 'feat/widget' } },
+    }
+    eq(start_pr(m, 3).reviewed_locally, true)
+  end)
+
+  it('disables every PR when the working tree is dirty, with a hint', function()
+    local m = build {
+      git = { dirty = true, default_base = 'origin/main' },
+      prs = { pr { number = 3 }, pr { number = 5 } },
+    }
+    eq(start_pr(m, 3).disabled, true)
+    ok(type(start_pr(m, 3).hint) == 'string' and start_pr(m, 3).hint ~= '', 'a hint explains why')
+    eq(start_pr(m, 5).disabled, true)
+    -- The local card is unaffected by the dirty tree — it's still offered.
+    eq(m.start.local_card.dirty, true)
+    eq(m.start.local_card.base, 'HEAD')
+  end)
+
+  it('leaves PRs enabled with no hint when the tree is clean', function()
+    local m = build {
+      git = { dirty = false, default_base = 'origin/main' },
+      prs = { pr { number = 3 } },
+    }
+    eq(start_pr(m, 3).disabled, false)
+    eq(start_pr(m, 3).hint, nil)
   end)
 end)

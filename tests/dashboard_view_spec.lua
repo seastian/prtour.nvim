@@ -177,6 +177,55 @@ describe('dashboard view — async PR loading', function()
     ok(entry_for(r, 'start_local'), 'local card selectable during load')
   end)
 
+  it('shows a dim "reviewed locally" tag on a matching PR, still selectable', function()
+    local r = render(model {
+      start = {
+        prs = { { number = 12, title = 'Add widget', author = { login = 'ann' }, additions = 3, deletions = 1, reviewed_locally = true, disabled = false } },
+        local_card = { base = 'origin/main', base_arg = 'origin/main', dirty = false },
+      },
+    })
+    ok(has_line(r, 'reviewed locally'), 'the tag is rendered')
+    ok(entry_for(r, 'start_pr'), 'a reviewed-locally PR is still selectable')
+    -- The tag text is dim.
+    local tagged
+    for _, e in ipairs(r.entries) do
+      if e.select.action == 'start_pr' then
+        tagged = r.lines[e.line]
+      end
+    end
+    local dim_covers_tag = false
+    for _, h in ipairs(r.hls) do
+      if h.group == 'PrtourDim' and tagged:sub(h.col_start + 1, h.col_end):find('reviewed locally', 1, true) then
+        dim_covers_tag = true
+      end
+    end
+    ok(dim_covers_tag, 'the tag is highlighted dim')
+  end)
+
+  it('renders a dirty-disabled PR as a dim, non-selectable row with a hint', function()
+    local r = render(model {
+      start = {
+        prs = { { number = 12, title = 'Add widget', author = { login = 'ann' }, additions = 3, deletions = 1, disabled = true, hint = 'working tree dirty — checkout blocked' } },
+        local_card = { base = 'HEAD', base_arg = nil, dirty = true },
+      },
+    })
+    ok(has_line(r, '#12'), 'the disabled PR is still shown')
+    ok(has_line(r, 'working tree dirty'), 'its hint explains why it is disabled')
+    ok(not entry_for(r, 'start_pr'), 'a disabled PR is not selectable')
+    -- The local card stays selectable even when every PR is disabled.
+    ok(entry_for(r, 'start_local'), 'the local card remains selectable')
+    -- The disabled row carries no quick-select number highlight.
+    local disabled_line
+    for i, l in ipairs(r.lines) do
+      if l:find('#12', 1, true) then
+        disabled_line = i
+      end
+    end
+    for _, h in ipairs(r.hls) do
+      ok(not (h.group == 'PrtourKey' and h.line == disabled_line - 1), 'no key highlight on a disabled row')
+    end
+  end)
+
   it('drops the spinner and lists PRs once loaded', function()
     local r = render(model {
       loading = false,

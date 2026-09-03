@@ -43,6 +43,18 @@ local function in_repo(record, slug)
   return record.key:sub(1, #prefix) == prefix
 end
 
+--- The hint shown on a PR that a dirty tree makes un-startable, so it's clear
+--- the entry is dimmed on purpose and how to make it selectable again.
+local DIRTY_HINT = 'working tree dirty — checkout blocked'
+
+--- Sanitize a branch name into the token used inside `-local-<branch>` progress
+--- keys. MUST match the mapping the tour writer applies (prtour.init), so a PR
+--- head branch and a prior local review of the same branch collide on the same
+--- token — that collision is exactly what the "reviewed locally" match is.
+local function branch_token(branch)
+  return (branch:gsub('[^%w%-_]', '-'))
+end
+
 --- The Resume line's headline. A PR tour enriched at start with the PR title
 --- (ticket #4) reads as "<title>  ·  <author>", so a review is recognisable
 --- without opening it — from local data only, no network on dashboard open.
@@ -83,10 +95,21 @@ function M.build(inputs)
   -- Resume: this repo's unfinished tours, most-recently-worked-first, capped.
   -- Unfinished == not yet covered; covered is walked-here for now, so a tour
   -- drops off once its walked set reaches its hunk total.
+  --
+  -- `resumed_pr` records every unfinished PR tour's number as we go — sourced
+  -- from the full record set, not the capped/sorted display list below, so a PR
+  -- with an in-flight tour is deduped out of Start even when its tour has aged
+  -- past RESUME_CAP. Otherwise it would reappear in Start offering a *fresh*
+  -- start that discards its progress — the conflicting affordance ticket #5
+  -- exists to remove.
   local resume = {}
+  local resumed_pr = {}
   for _, r in ipairs(records) do
     if is_valid(r) and in_repo(r, slug) and walked(r) < tonumber(r.total) then
       resume[#resume + 1] = resume_entry(r)
+      if r.resume.kind == 'pr' and r.resume.pr then
+        resumed_pr[r.resume.pr] = true
+      end
     end
   end
   table.sort(resume, function(a, b)
@@ -96,9 +119,38 @@ function M.build(inputs)
     resume[i] = nil
   end
 
-  -- Start: open PRs pass straight through (empty until the fetch returns); the
-  -- local card adapts to the working tree — HEAD when dirty, else the default
-  -- branch.
+  -- `reviewed_branch`: branch tokens with any prior local review (finished or
+  -- not) — the source of the "reviewed locally" tag. (`resumed_pr`, the other
+  -- Start-PR input, is gathered with the Resume loop above.)
+  local reviewed_branch = {}
+  local local_prefix = slug .. '-local-'
+  for _, r in ipairs(records) do
+    if type(r) == 'table' and type(r.key) == 'string' and r.key:sub(1, #local_prefix) == local_prefix then
+      reviewed_branch[r.key:sub(#local_prefix + 1)] = true
+    end
+  end
+
+  -- Start: shape each open PR (empty until the fetch returns) into a display
+  -- record plus the two decision flags the buffer only renders. A dirty tree
+  -- can't check a branch out over local changes, so every PR is disabled with a
+  -- hint; the local card below is unaffected and stays selectable.
+  local start_prs = {}
+  for _, p in ipairs(inputs.prs or {}) do
+    if not (p.number and resumed_pr[p.number]) then
+      local entry = {}
+      for k, v in pairs(p) do
+        entry[k] = v
+      end
+      local token = type(p.headRefName) == 'string' and branch_token(p.headRefName) or nil
+      entry.reviewed_locally = token ~= nil and reviewed_branch[token] == true
+      entry.disabled = git.dirty or false
+      entry.hint = git.dirty and DIRTY_HINT or nil
+      start_prs[#start_prs + 1] = entry
+    end
+  end
+
+  -- The local card adapts to the working tree — HEAD when dirty, else the
+  -- default branch — and is always selectable.
   local local_card = {
     base = git.dirty and 'HEAD' or git.default_base,
     base_arg = git.dirty and nil or git.default_base,
@@ -109,7 +161,7 @@ function M.build(inputs)
     loading = inputs.prs == nil,
     resume = resume,
     start = {
-      prs = inputs.prs or {},
+      prs = start_prs,
       local_card = local_card,
     },
   }

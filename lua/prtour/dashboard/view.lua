@@ -19,6 +19,13 @@
 --   hls      { line, col_start, col_end, group }[]  0-based highlight spans
 local M = {}
 
+--- The interpunct separator that sets a dim tag/hint off from a row's body,
+--- matching the "  ·  " the resume line already uses for its meta figures.
+local TAG_SEP = '  ·  '
+
+--- The tag a PR carries when its head branch matches a prior local review.
+local REVIEWED_TAG = 'reviewed locally'
+
 --- Compact "time since" for a last-touched epoch; '' when unknown.
 local function ago(then_, now)
   if type(then_) ~= 'number' then
@@ -161,7 +168,25 @@ function M.render(model, opts)
     b:hl(b:push(spin), 0, -1, 'PrtourDim')
   else
     for _, pr in ipairs(model.start.prs) do
-      b:entry(pr_body(pr), { action = 'start_pr', number = pr.number })
+      local body = pr_body(pr)
+      if pr.disabled then
+        -- The model marks a PR un-startable (a dirty tree can't check it out).
+        -- Draw it aligned with the numbered rows but as a plain, whole-line-dim,
+        -- unselectable row — no entry, no quick-select number — with its hint so
+        -- the dimming reads as intentional.
+        if pr.hint then
+          body = body .. TAG_SEP .. pr.hint
+        end
+        b:hl(b:push('    ' .. body), 0, -1, 'PrtourDim')
+      else
+        local line = b:entry(body, { action = 'start_pr', number = pr.number })
+        -- A PR whose head branch matches a prior local review carries a dim tag.
+        if pr.reviewed_locally then
+          local text = b.lines[line] .. TAG_SEP .. REVIEWED_TAG
+          b.lines[line] = text
+          b:hl(line, #text - #REVIEWED_TAG, #text, 'PrtourDim')
+        end
+      end
     end
   end
 
