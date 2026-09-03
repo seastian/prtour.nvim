@@ -30,6 +30,8 @@ local function ensure_hls()
     PrtourTitle = { fg = fg 'Function', bold = true },
     PrtourDim = { fg = fg 'NonText' },
     PrtourKey = { fg = fg 'Special', bold = true },
+    -- The reviewed/covered colour, mirroring the tour HUD, for the "complete" tag.
+    PrtourReviewed = { fg = fg 'Question' or fg 'Special', italic = true },
   }
   for group, spec in pairs(defaults) do
     if vim.fn.hlexists(group) == 0 then

@@ -163,6 +163,80 @@ describe('dashboard model — resume list', function()
   end)
 end)
 
+describe('dashboard model — cross-tour coverage (ADR-0001)', function()
+  it('covered equals walked-here when no other tour has seen the content', function()
+    -- A lone tour: its manifest hashes, some walked, none reviewed elsewhere.
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-1', hunks = { 'a', 'b', 'c' }, seen = { 'a' }, total = 3 },
+      },
+    }
+    eq(m.resume[1].walked, 1)
+    eq(m.resume[1].covered, 1)
+    eq(m.resume[1].total, 3)
+  end)
+
+  it('counts content reviewed in another tour toward covered but not walked', function()
+    -- PR tour walked only `a`; a prior local review walked `b`, so `b` is
+    -- reviewed-earlier for the PR tour: covered 2, walked 1.
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-1', resume = { kind = 'pr', pr = 1 }, hunks = { 'a', 'b', 'c' }, seen = { 'a' }, total = 3 },
+        record { key = SLUG .. '-local-feat', resume = { kind = 'local' }, hunks = { 'a', 'b', 'c' }, seen = { 'b' }, total = 3 },
+      },
+    }
+    local pr = by_key(m.resume, SLUG .. '-pr-1')
+    eq(pr.walked, 1)
+    eq(pr.covered, 2)
+  end)
+
+  it('drops a tour fully covered via reviewed-earlier from Resume', function()
+    -- The PR tour was never walked (seen empty) but a prior local review walked
+    -- every one of its hunks — so it is complete, not unfinished.
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-1', resume = { kind = 'pr', pr = 1 }, hunks = { 'a', 'b' }, seen = {}, total = 2 },
+        record { key = SLUG .. '-local-feat', resume = { kind = 'local' }, hunks = { 'a', 'b' }, seen = { 'a', 'b' }, total = 2 },
+      },
+    }
+    ok(by_key(m.resume, SLUG .. '-pr-1') == nil, 'fully-covered PR tour is not offered for resume')
+  end)
+
+  it('marks a Start PR complete when its tour is fully covered from elsewhere', function()
+    -- PR #1's own tour was fully covered by a prior local review, so on the
+    -- dashboard the pushed branch reads as already-reviewed before opening.
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-1', resume = { kind = 'pr', pr = 1 }, hunks = { 'a', 'b' }, seen = {}, total = 2 },
+        record { key = SLUG .. '-local-feat', resume = { kind = 'local' }, hunks = { 'a', 'b' }, seen = { 'a', 'b' }, total = 2 },
+      },
+      prs = { { number = 1, title = 'Add widget', author = { login = 'ann' }, headRefName = 'feat' } },
+    }
+    local entry
+    for _, e in ipairs(m.start.prs) do
+      if e.number == 1 then
+        entry = e
+      end
+    end
+    ok(entry ~= nil, 'the completed PR still appears in Start')
+    eq(entry.complete, true)
+  end)
+
+  it('does not mark a PR complete when its tour is only partly covered', function()
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-1', resume = { kind = 'pr', pr = 1 }, hunks = { 'a', 'b', 'c' }, seen = { 'a' }, total = 3 },
+      },
+      prs = { { number = 1, title = 'Add widget', author = { login = 'ann' }, headRefName = 'feat' } },
+    }
+    -- An unfinished tour keeps the PR out of Start entirely (deduped to Resume).
+    for _, e in ipairs(m.start.prs) do
+      ok(e.number ~= 1, 'an unfinished PR tour is not re-offered in Start')
+    end
+    eq(by_key(m.resume, SLUG .. '-pr-1').covered, 1)
+  end)
+end)
+
 describe('dashboard model — start section', function()
   it('carries the open PRs\' display fields through, unflagged by default', function()
     local prs = {

@@ -26,6 +26,11 @@ local TAG_SEP = '  ·  '
 --- The tag a PR carries when its head branch matches a prior local review.
 local REVIEWED_TAG = 'reviewed locally'
 
+--- The tag a PR carries when its own tour is already fully covered (ADR-0001) —
+--- a stronger signal than `reviewed locally`: the pushed branch is effectively
+--- reviewed, so the row can be skipped rather than opened.
+local COMPLETE_TAG = 'complete'
+
 --- Compact "time since" for a last-touched epoch; '' when unknown.
 local function ago(then_, now)
   if type(then_) ~= 'number' then
@@ -83,6 +88,15 @@ local function builder()
     self.hls[#self.hls + 1] = { line = line - 1, col_start = col_start, col_end = col_end, group = group }
   end
 
+  --- Append a trailing ` · <tag>` to an already-drawn line and highlight just
+  --- the tag text — the shared shape behind every Resume/Start secondary tag
+  --- (last-touched time, "reviewed locally", "complete").
+  function b:tag(line, tag, group)
+    local text = self.lines[line] .. TAG_SEP .. tag
+    self.lines[line] = text
+    self:hl(line, #text - #tag, #text, group)
+  end
+
   --- Draw a selectable row: ` N  <body>`. Only the first nine rows show a
   --- quick-select number (those are the only ones bound to a key); later rows
   --- keep the same indent but no number, since they're reached with j/k. The
@@ -102,9 +116,15 @@ local function builder()
   return b
 end
 
---- Build a Resume row body from a model resume entry.
+--- Build a Resume row body from a model resume entry. Progress leads with
+--- *covered* (walked-here ∪ reviewed-earlier, ADR-0001); walked-here trails as a
+--- secondary figure only when a prior tour has carried some of the coverage, so
+--- an ordinary tour with no cross-tour help shows a single, uncluttered figure.
 local function resume_body(e)
-  local meta = ('%s  ·  walked %d/%d'):format(e.badge, e.walked, e.total)
+  local meta = ('%s  ·  covered %d/%d'):format(e.badge, e.covered, e.total)
+  if e.walked < e.covered then
+    meta = meta .. ('  ·  %d here'):format(e.walked)
+  end
   return ('%-24s  %s'):format(e.label, meta)
 end
 
@@ -149,9 +169,7 @@ function M.render(model, opts)
       local line = b:entry(resume_body(e), { action = 'resume', resume = e.resume })
       local rel = ago(e.last_touched, now)
       if rel ~= '' then
-        local text = b.lines[line] .. '  ·  ' .. rel
-        b.lines[line] = text
-        b:hl(line, #text - #rel, #text, 'PrtourDim')
+        b:tag(line, rel, 'PrtourDim')
       end
     end
     b:push ''
@@ -180,11 +198,13 @@ function M.render(model, opts)
         b:hl(b:push('    ' .. body), 0, -1, 'PrtourDim')
       else
         local line = b:entry(body, { action = 'start_pr', number = pr.number })
-        -- A PR whose head branch matches a prior local review carries a dim tag.
-        if pr.reviewed_locally then
-          local text = b.lines[line] .. TAG_SEP .. REVIEWED_TAG
-          b.lines[line] = text
-          b:hl(line, #text - #REVIEWED_TAG, #text, 'PrtourDim')
+        -- A fully-covered tour is the stronger signal, so `complete` wins over a
+        -- mere branch-name `reviewed locally` match; drawn in the reviewed colour
+        -- rather than dim so it reads as a positive "already done", not a warning.
+        if pr.complete then
+          b:tag(line, COMPLETE_TAG, 'PrtourReviewed')
+        elseif pr.reviewed_locally then
+          b:tag(line, REVIEWED_TAG, 'PrtourDim')
         end
       end
     end

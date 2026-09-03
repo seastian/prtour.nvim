@@ -29,6 +29,7 @@ local function resume_entry(over)
     badge = 'PR',
     label = 'PR #7',
     walked = 2,
+    covered = 2,
     total = 5,
     last_touched = 1000,
     resume = { kind = 'pr', pr = 7 },
@@ -95,6 +96,25 @@ describe('dashboard view — sections', function()
     local r = render(model { start = { prs = {}, local_card = { base = nil, base_arg = nil, dirty = false } } })
     ok(has_line(r, 'local'), 'local card still drawn with an unknown base')
     ok(entry_for(r, 'start_local'), 'and stays selectable')
+  end)
+end)
+
+describe('dashboard view — coverage on resume lines', function()
+  it('leads with covered/total on a resume line', function()
+    local r = render(model { resume = { resume_entry { covered = 3, walked = 1, total = 5 } } })
+    ok(has_line(r, 'covered 3/5'), 'the covered figure leads')
+  end)
+
+  it('shows walked-here as a secondary figure when it trails covered', function()
+    local r = render(model { resume = { resume_entry { covered = 3, walked = 1, total = 5 } } })
+    ok(has_line(r, '1 here'), 'walked-here shown when cross-tour coverage is ahead')
+  end)
+
+  it('omits the walked-here figure when nothing was reviewed earlier', function()
+    -- covered == walked: the two figures coincide, so only one is shown.
+    local r = render(model { resume = { resume_entry { covered = 2, walked = 2, total = 5 } } })
+    ok(has_line(r, 'covered 2/5'), 'covered still shown')
+    ok(not has_line(r, 'here'), 'no redundant walked-here figure')
   end)
 end)
 
@@ -200,6 +220,17 @@ describe('dashboard view — async PR loading', function()
       end
     end
     ok(dim_covers_tag, 'the tag is highlighted dim')
+  end)
+
+  it('shows a "complete" tag on a fully-covered PR, still selectable', function()
+    local r = render(model {
+      start = {
+        prs = { { number = 12, title = 'Add widget', author = { login = 'ann' }, additions = 3, deletions = 1, complete = true, disabled = false } },
+        local_card = { base = 'origin/main', base_arg = 'origin/main', dirty = false },
+      },
+    })
+    ok(has_line(r, 'complete'), 'the complete tag is rendered')
+    ok(entry_for(r, 'start_pr'), 'a complete PR can still be re-opened')
   end)
 
   it('renders a dirty-disabled PR as a dim, non-selectable row with a hint', function()
