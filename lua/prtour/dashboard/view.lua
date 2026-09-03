@@ -31,6 +31,34 @@ local REVIEWED_TAG = 'reviewed locally'
 --- reviewed, so the row can be skipped rather than opened.
 local COMPLETE_TAG = 'complete'
 
+--- The header wordmark: a block-letter "PRTOUR" drawn from half/full blocks.
+--- Each glyph is a 5-row × 4-column cell; joining the six with single-space
+--- gutters makes every row exactly 29 display columns wide, so the repo name
+--- and tagline can be parked at a fixed offset to its right. Built once here so
+--- the letters are verifiable column-by-column rather than typed as one blob.
+local LOGO_GLYPHS = {
+  P = { '███ ', '█  █', '███ ', '█   ', '█   ' },
+  R = { '███ ', '█  █', '███ ', '█ █ ', '█  █' },
+  T = { '████', ' ██ ', ' ██ ', ' ██ ', ' ██ ' },
+  O = { ' ██ ', '█  █', '█  █', '█  █', ' ██ ' },
+  U = { '█  █', '█  █', '█  █', '█  █', ' ██ ' },
+}
+
+--- The five assembled logo rows (P R T O U R), computed at load.
+local LOGO = (function()
+  local rows = { '', '', '', '', '' }
+  for i, name in ipairs { 'P', 'R', 'T', 'O', 'U', 'R' } do
+    for r = 1, 5 do
+      rows[r] = rows[r] .. (i > 1 and ' ' or '') .. LOGO_GLYPHS[name][r]
+    end
+  end
+  return rows
+end)()
+
+local LOGO_INDENT = '  '
+--- The blank columns between the wordmark and its right-hand caption.
+local LOGO_GUTTER = '     '
+
 --- Compact "time since" for a last-touched epoch; '' when unknown.
 local function ago(then_, now)
   if type(then_) ~= 'number' then
@@ -158,8 +186,24 @@ function M.render(model, opts)
   local now = opts.now or 0
   local b = builder()
 
-  local title = ('prtour — %s'):format(opts.repo or '')
-  b:hl(b:push(title), 0, #title, 'PrtourKicker')
+  -- Header: the block-letter wordmark in the key accent, with the repo name and
+  -- a three-line tagline set dim to its right. `#LOGO[i]` is a BYTE length (each
+  -- █ is three bytes) — correct for the highlight span and for offsetting the
+  -- caption, which starts after the indent + art + gutter.
+  local caption = { opts.repo or '', '', 'guided', 'one-keypress', 'PR review' }
+  for i = 1, #LOGO do
+    local art = LOGO_INDENT .. LOGO[i]
+    local text, side = art, caption[i]
+    if side ~= '' then
+      text = art .. LOGO_GUTTER .. side
+    end
+    local line = b:push(text)
+    b:hl(line, #LOGO_INDENT, #LOGO_INDENT + #LOGO[i], 'PrtourKey')
+    if side ~= '' then
+      local start = #art + #LOGO_GUTTER
+      b:hl(line, start, start + #side, 'PrtourKicker')
+    end
+  end
   b:push ''
 
   -- Resume — omitted entirely when there are no unfinished tours.

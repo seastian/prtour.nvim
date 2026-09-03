@@ -63,6 +63,35 @@ local function entry_for(r, action)
   end
 end
 
+describe('dashboard view — header', function()
+  it('draws the block wordmark with the repo name as a caption', function()
+    local r = render(model())
+    ok(has_line(r, '███'), 'the block-letter wordmark is drawn')
+    ok(has_line(r, 'prtour.nvim'), 'the repo name captions the wordmark')
+  end)
+
+  it('accents the wordmark and dims the caption', function()
+    local r = render(model())
+    local logo_line, has_key, has_dim
+    for i, l in ipairs(r.lines) do
+      if l:find('███', 1, true) and l:find('prtour.nvim', 1, true) then
+        logo_line = i
+      end
+    end
+    ok(logo_line, 'the first wordmark row also carries the repo caption')
+    for _, h in ipairs(r.hls) do
+      if h.line == logo_line - 1 and h.group == 'PrtourKey' then
+        has_key = true
+      end
+      if h.line == logo_line - 1 and h.group == 'PrtourKicker' then
+        has_dim = true
+      end
+    end
+    ok(has_key, 'the wordmark is highlighted in the key accent')
+    ok(has_dim, 'the caption is highlighted as a kicker')
+  end)
+end)
+
 describe('dashboard view — sections', function()
   it('omits the Resume header when there are no unfinished tours', function()
     local r = render(model())

@@ -224,7 +224,7 @@ function M.open()
   vim.bo[buf].filetype = 'prtour-dashboard'
   -- A full-window buffer, not a cursor-anchored popup: fill the editor (minus
   -- the command line) so the dashboard reads as a screen, not a menu. The
-  -- in-buffer "prtour — <repo>" header stands in for a window title.
+  -- in-buffer block-letter "PRTOUR" wordmark stands in for a window title.
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'editor',
     row = 0,
