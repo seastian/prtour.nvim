@@ -8,7 +8,7 @@ Instead of walking a PR file-by-file in alphabetical order, prtour asks Claude C
 
 `\`
 
-- **Outside a tour** it opens the launcher: resume an unfinished review, pick an open PR, or review local changes.
+- **Outside a tour** it opens the dashboard: a full-window view of this repo's unfinished tours to **resume** and fresh tours to **start** (open PRs, plus a local-review card). Resume and the local card show instantly; open PRs stream in under a spinner. Number keys `1`–`9` or `j`/`k`+Enter select; `r` refreshes; `q`/`Esc`/`\` close.
 - **Inside a tour** it opens a context menu showing only the actions that apply where your cursor is.
 
 During a tour: **Enter** = next hunk, **Backspace** = previous hunk. That's everything you need to remember.
@@ -96,6 +96,16 @@ Highlights: the HUD defines `PrtourTitle`, `PrtourKicker`, `PrtourDim`, `PrtourK
 2. Claude Code receives the hunk bodies on stdin and returns ordered steps as JSON; the result is validated (every hunk exactly once, stragglers collected into a visible final step) and cached under `~/.cache/nvim/prtour/` keyed by diff content.
 3. The tour repoints gitsigns at the base revision and walks the manifest. Progress persists on every jump; hunks are identified by `sha256(path + hunk body)`, so seen-state survives anything that doesn't change the hunk itself.
 4. GitHub writes go through `gh`: comments accumulate into your single pending review (GraphQL — repeated saves append), and a final submit attaches the verdict.
+
+## Tests
+
+The pure modules (no `vim.*`, no IO) run without a Neovim. From the repo root:
+
+```sh
+luajit tests/run.lua
+```
+
+The runner discovers every `tests/*_spec.lua`, so new pure modules are tested by dropping a spec beside the existing ones.
 
 ## Status
 
