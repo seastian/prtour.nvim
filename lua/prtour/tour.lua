@@ -102,6 +102,7 @@ local function define_hls()
   vim.api.nvim_set_hl(0, 'PrtourNext', { fg = fg_of 'Comment', italic = true })
   vim.api.nvim_set_hl(0, 'PrtourAdded', { fg = fg_of 'Added' or fg_of 'String', bold = true })
   vim.api.nvim_set_hl(0, 'PrtourRemoved', { fg = fg_of 'Removed' or fg_of 'Error', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourReviewed', { fg = fg_of 'Question' or fg_of 'Special', italic = true })
   vim.api.nvim_set_hl(0, 'PrtourFlash', { link = 'IncSearch' })
 end
 
@@ -180,7 +181,40 @@ local function toggle_split()
   end
 end
 
----@param opts {pr: integer, pr_id: string|nil, title: string|nil, author: string|nil, base: string, hunks: prtour.Hunk[], steps: prtour.Step[], mark_viewed: boolean}
+--- A hunk is *covered* when walked here in this tour (`state.visited`) or
+--- recognised as *reviewed-earlier* via the cross-tour overlay (ADR-0001).
+--- Covered drives the frontier, step completion and the completion check;
+--- walked-here (`state.visited` / persisted `state.seen`) stays this tour's own.
+local function covered_id(id)
+  if state.visited[id] then
+    return true
+  end
+  local h = state.by_id[id]
+  return h ~= nil and state.reviewed_earlier[h.hash] == true
+end
+
+--- Count hunks in the tour whose flat entry satisfies `pred`.
+local function count_flat(pred)
+  local n = 0
+  for _, entry in ipairs(state.flat) do
+    if pred(entry) then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+local function covered_count()
+  return count_flat(function(entry)
+    return covered_id(entry.id)
+  end)
+end
+
+local function all_covered()
+  return #state.flat > 0 and covered_count() == #state.flat
+end
+
+---@param opts {pr: integer, pr_id: string|nil, title: string|nil, author: string|nil, base: string, hunks: prtour.Hunk[], steps: prtour.Step[], mark_viewed: boolean, slug: string|nil}
 function M.start(opts)
   local by_id, flat, per_file_left = {}, {}, {}
   for _, h in ipairs(opts.hunks) do
@@ -206,6 +240,10 @@ function M.start(opts)
     resume = opts.resume,
     sha = opts.sha,
     seen = {},
+    -- Reviewed-earlier overlay (ADR-0001): filled below from other same-repo
+    -- tours' seen sets. Kept separate from `seen` so this tour's own persisted
+    -- set stays walked-here only.
+    reviewed_earlier = {},
     base = opts.base,
     steps = opts.steps,
     mark_viewed = opts.mark_viewed,
@@ -321,21 +359,32 @@ function M.start(opts)
       end
     end
   end
+  -- Cross-tour overlay: content walked in OTHER same-repo tours, pre-seeded as
+  -- seen so the frontier parks on genuinely-new hunks (ADR-0001). Recomputed
+  -- each load from the progress files, never folded into this tour's own `seen`.
+  -- `state.seen` here is this tour's own walked-here set (loaded above), so it is
+  -- correctly subtracted from the union.
+  if opts.slug then
+    state.reviewed_earlier =
+      require('prtour.overlay').reviewed_earlier(require('prtour.records').read(opts.slug), state.key, state.seen)
+  end
   -- Exact position only resumes for the same diff; otherwise the frontier rule applies.
   local pos = saved and saved.sha == opts.sha and tonumber(saved.pos) or nil
   if not pos then
-    -- No local progress: start on the last seen hunk, so <CR> enters new territory.
-    local first_unvisited
+    -- No local progress: start on the last covered hunk, so <CR> enters new
+    -- territory — reviewed-earlier hunks count as covered, so the frontier
+    -- parks past them onto genuinely-new content.
+    local first_uncovered
     for i, entry in ipairs(flat) do
-      if not state.visited[entry.id] then
-        first_unvisited = i
+      if not covered_id(entry.id) then
+        first_uncovered = i
         break
       end
     end
-    if not first_unvisited then
-      pos = #flat -- everything seen; start at the end rather than replaying
-    elseif first_unvisited > 1 then
-      pos = first_unvisited - 1
+    if not first_uncovered then
+      pos = #flat -- everything covered; start at the end rather than replaying
+    elseif first_uncovered > 1 then
+      pos = first_uncovered - 1
     end
   end
   if pos and pos >= 1 and pos <= #flat then
@@ -345,6 +394,21 @@ function M.start(opts)
     end
   end
   M.next()
+  -- A tour is complete when everything is *covered*, not only when every hunk is
+  -- walked here — so a PR whose content was fully reviewed in a prior local
+  -- review reports complete without re-reading each hunk (ADR-0001). Announced
+  -- only when the overlay actually carried the tour, so an ordinary walk to the
+  -- end (which reaches the summary screen instead) stays quiet.
+  if all_covered() then
+    -- Under all_covered() the un-walked remainder is exactly what the overlay
+    -- carried, i.e. the reviewed-earlier count.
+    local reviewed = count_flat(function(entry)
+      return not state.visited[entry.id]
+    end)
+    if reviewed > 0 then
+      vim.notify(('prtour: ✓ tour complete — all %d hunks covered (%d reviewed earlier)'):format(#state.flat, reviewed))
+    end
+  end
 end
 
 local EVENTS = { approve = 'APPROVE', comment = 'COMMENT', ['request-changes'] = 'REQUEST_CHANGES', pending = nil }
@@ -501,6 +565,12 @@ local function open_hunk(h)
   elseif h.deleted then
     badges[#badges + 1] = { '  deleted ', 'PrtourRemoved' }
   end
+  -- Distinct rendering for content already reviewed in another same-repo tour
+  -- (ADR-0001): shown whenever this hunk's hash is in the overlay, so it reads
+  -- the same on first arrival and on revisits.
+  if state.reviewed_earlier[h.hash] then
+    badges[#badges + 1] = { ' ⤺ reviewed earlier ', 'PrtourReviewed' }
+  end
   if state.github_viewed and state.github_viewed[h.file] then
     badges[#badges + 1] = { ' ✓ viewed ', 'PrtourDim' }
   end
@@ -563,7 +633,11 @@ local function show_position()
     rows[#rows + 1] = segs
   end
   local in_step = state.pos - state.step_start[entry.step] + 1
-  local pct = ('%d%%'):format(math.floor(vim.tbl_count(state.visited) / #state.flat * 100 + 0.5))
+  -- Two figures (ADR-0001): walked-here (this tour's own seen) and covered
+  -- (walked-here ∪ reviewed-earlier). The headline percentage leads with covered.
+  local walked_n = vim.tbl_count(state.visited)
+  local covered_n = covered_count()
+  local pct = ('%d%%'):format(math.floor(covered_n / #state.flat * 100 + 0.5))
   local queued = require('prtour.comments').count()
   local kicker = (' STEP %d/%d · HUNK %d/%d%s'):format(
     entry.step, #state.steps, in_step, #step.hunks,
@@ -590,6 +664,10 @@ local function show_position()
   if next_step then
     add { { vim.fn.strcharpart((' next → %s'):format(next_step.title), 0, width - 1), 'PrtourNext' } }
   end
+  add {
+    { (' walked-here %d/%d'):format(walked_n, #state.flat), 'PrtourDim' },
+    { ('  ·  covered %d/%d'):format(covered_n, #state.flat), covered_n > walked_n and 'PrtourReviewed' or 'PrtourDim' },
+  }
   add { { ' ' .. ('─'):rep(width - 2), 'PrtourDim' } }
   local segs = {}
   for _, d in ipairs { { '⏎', 'next' }, { '⌫', 'prev' }, { '\\', 'actions' } } do
@@ -646,7 +724,7 @@ end
 
 local function step_complete(si)
   for _, id in ipairs(state.steps[si].hunks) do
-    if not state.visited[id] then
+    if not covered_id(id) then
       return false
     end
   end
@@ -671,7 +749,8 @@ local function show_summary()
     ('  Tour complete — %s'):format(state.label),
     '',
     ('  steps cleared    %d/%d'):format(steps_cleared(), #state.steps),
-    ('  hunks read       %d/%d'):format(vim.tbl_count(state.visited), #state.flat),
+    ('  walked here      %d/%d'):format(vim.tbl_count(state.visited), #state.flat),
+    ('  covered          %d/%d'):format(covered_count(), #state.flat),
     ('  files seen       %d'):format(vim.tbl_count(files)),
     ('  comments queued  %d'):format(require('prtour.comments').count()),
     ('  session time     %dm %02ds'):format(math.floor(elapsed / 60), elapsed % 60),
@@ -766,7 +845,7 @@ function M.next_unseen(dir)
   end
   local i = state.pos + dir
   while i >= 1 and i <= #state.flat do
-    if not state.visited[state.flat[i].id] then
+    if not covered_id(state.flat[i].id) then
       return goto_pos(i)
     end
     i = i + dir

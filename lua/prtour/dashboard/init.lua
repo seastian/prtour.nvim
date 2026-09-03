@@ -55,23 +55,7 @@ end
 --- This repo's decoded progress records, each enriched with the fields the
 --- model reads but the on-disk record doesn't store: its cache `key` (from the
 --- filename) and `last_touched` (the file's mtime).
-local function read_records(slug)
-  local dir = vim.fn.stdpath 'cache' .. '/prtour'
-  local records = {}
-  for _, path in ipairs(vim.fn.glob(('%s/progress-%s-*.json'):format(dir, slug), false, true)) do
-    local f = io.open(path, 'r')
-    if f then
-      local ok, saved = pcall(vim.json.decode, f:read '*a')
-      f:close()
-      if ok and type(saved) == 'table' then
-        saved.key = vim.fn.fnamemodify(path, ':t'):gsub('^progress%-', ''):gsub('%.json$', '')
-        saved.last_touched = vim.fn.getftime(path)
-        records[#records + 1] = saved
-      end
-    end
-  end
-  return records
-end
+local read_records = require('prtour.records').read
 
 --- Rebuild the model from the current inputs and redraw the buffer.
 local function render()
