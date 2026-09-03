@@ -270,7 +270,29 @@ describe('dashboard model — start section', function()
   it('bases the local card on HEAD when the tree is dirty', function()
     local m = build { git = { dirty = true, default_base = 'origin/main' } }
     eq(m.start.local_card.base, 'HEAD')
+    eq(m.start.local_card.base_arg, nil)
     eq(m.start.local_card.dirty, true)
+    -- Dirty + a resolvable default branch → the card offers the toggle, with the
+    -- default branch as the other (alt) target.
+    eq(m.start.local_card.toggleable, true)
+    eq(m.start.local_card.alt, 'origin/main')
+  end)
+
+  it('bases the dirty local card on the default branch when local_vs_base is set', function()
+    local m = build { git = { dirty = true, default_base = 'origin/main' }, local_vs_base = true }
+    eq(m.start.local_card.base, 'origin/main')
+    eq(m.start.local_card.base_arg, 'origin/main')
+    eq(m.start.local_card.toggleable, true)
+    -- Now HEAD is the other target the toggle would return to.
+    eq(m.start.local_card.alt, 'HEAD')
+  end)
+
+  it('does not offer the toggle on a dirty tree with no resolvable default branch', function()
+    -- local_vs_base is ignored: there is nothing to toggle to.
+    local m = build { git = { dirty = true, default_base = nil }, local_vs_base = true }
+    eq(m.start.local_card.base, 'HEAD')
+    eq(m.start.local_card.base_arg, nil)
+    eq(m.start.local_card.toggleable, false)
   end)
 
   it('bases the local card on the default branch when the tree is clean', function()
