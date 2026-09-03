@@ -30,7 +30,11 @@ function M.start(title)
   end
   vim.notify('prtour: ' .. title .. '…')
   return {
-    report = function() end,
+    -- Without fidget, show live status on the command line — transient (kept
+    -- out of :messages) so a streaming step's ticking updates don't pile up.
+    report = function(_, msg)
+      vim.api.nvim_echo({ { 'prtour: ' .. msg } }, false, {})
+    end,
     finish = function(_, msg)
       if msg then
         vim.notify('prtour: ' .. msg)

@@ -14,7 +14,9 @@ You are running inside the repo with the PR branch checked out; read surrounding
 
 Order the hunks the way a reviewer should read them: foundations first (types, schemas, data model), then core logic, then call sites and UI, with tests next to the code they test. Group related hunks into narrative steps that each tell one part of the story. Put mechanical churn (imports, renames, lockfiles, generated files, formatting) into a final step titled "Mechanical changes" that the reviewer can skim.
 
-Reply with ONLY a JSON object, no prose, no code fences:
+First, narrate your plan as you work it out: a handful of short plain-language lines, one brief phrase per line (for example: "foundations first: the schema", then "the request handler", then "call sites and UI last"). Keep each line under 60 characters and never use the character { in the narration.
+
+Then, as the final thing in your reply, output ONLY a JSON object and nothing after it — no prose, no code fences:
 {"steps":[{"title":"short step title","note":"one sentence: what to check here","hunks":[<ids>]}]}
 Every hunk id must appear exactly once across all steps.
 ]]
@@ -135,23 +137,161 @@ local function validate(steps, hunks)
   return #out > 0 and out or nil
 end
 
-local function run_claude(opts, instructions, stdin, cb)
+-- Claude ordering is the slowest, most opaque step, so we stream it. The
+-- `claude` CLI in `--output-format stream-json` mode emits one JSON event per
+-- line; assistant text arrives token-by-token as content_block_delta events.
+-- We surface that live (the prompt narrates a reading plan before the JSON) so
+-- the user sees genuine activity, not just a spinner.
+local ORDER_TIMEOUT_MS = 120000
+
+--- The text of a stream-json content_block_delta event, or nil for any other
+--- event. Pure: takes an already-decoded event table.
+local function extract_delta(ev)
+  if
+    type(ev) == 'table'
+    and ev.type == 'stream_event'
+    and type(ev.event) == 'table'
+    and ev.event.type == 'content_block_delta'
+    and type(ev.event.delta) == 'table'
+    and type(ev.event.delta.text) == 'string'
+  then
+    return ev.event.delta.text
+  end
+  return nil
+end
+
+local function trim(s)
+  return (s:gsub('^%s+', ''):gsub('%s+$', ''))
+end
+
+--- The line to show for accumulated assistant text: the last non-empty line of
+--- the narration, i.e. the prose that precedes the JSON manifest. Once the JSON
+--- object starts (first `{`), nothing after it is shown — so raw JSON never
+--- leaks into the status line (and a JSON-only reply shows no line at all).
+local function display_line(acc)
+  local head = acc
+  local brace = acc:find('{', 1, true)
+  if brace then
+    head = acc:sub(1, brace - 1)
+  end
+  local last
+  for line in (head .. '\n'):gmatch '([^\n]*)\n' do
+    local t = trim(line)
+    if t ~= '' then
+      last = t
+    end
+  end
+  return last
+end
+
+--- A stateful stream-json reader: feed it stdout chunks (split on newlines,
+--- buffering the partial tail), and read the accumulated assistant text back.
+local function stream_parser()
+  local buf, acc = '', ''
+  return {
+    feed = function(data)
+      if not data or data == '' then
+        return
+      end
+      buf = buf .. data
+      while true do
+        local nl = buf:find('\n', 1, true)
+        if not nl then
+          break
+        end
+        local line = buf:sub(1, nl - 1)
+        buf = buf:sub(nl + 1)
+        if line ~= '' then
+          local ok, ev = pcall(vim.json.decode, line)
+          if ok then
+            local text = extract_delta(ev)
+            if text then
+              acc = acc .. text
+            end
+          end
+        end
+      end
+    end,
+    text = function()
+      return acc
+    end,
+  }
+end
+
+--- Invoke Claude for a manifest. `on_line(text)` is called (scheduled) as the
+--- narration streams; `cb(steps|nil)` fires once at the end.
+local function run_claude(opts, instructions, stdin, on_line, cb)
   local cmd = vim.deepcopy(opts.claude_cmd or { 'claude', '-p' })
+  -- Streaming flags only make sense for the real `claude` CLI; a custom
+  -- claude_cmd (some other tool) runs unstreamed and is parsed at the end.
+  local streaming = (cmd[1] or ''):find('claude', 1, true) ~= nil
+  local parser = streaming and stream_parser() or nil
+  if streaming then
+    vim.list_extend(cmd, { '--output-format', 'stream-json', '--include-partial-messages', '--verbose' })
+  end
   cmd[#cmd + 1] = instructions
   local model = (require('prtour').config.models or {}).manifest
   if model then
     cmd[#cmd + 1] = '--model=' .. model
   end
-  vim.system(cmd, { text = true, stdin = stdin }, function(out)
+  local sysopts = { text = true, stdin = stdin, timeout = ORDER_TIMEOUT_MS }
+  if parser then
+    sysopts.stdout = function(_, data)
+      parser.feed(data)
+      local line = display_line(parser.text())
+      if line then
+        vim.schedule(function()
+          on_line(line)
+        end)
+      end
+    end
+  end
+  vim.system(cmd, sysopts, function(out)
     vim.schedule(function()
       if out.code ~= 0 then
         return cb(nil)
       end
-      local json = (out.stdout or ''):match '(%b{})'
+      -- Streamed runs assemble text from deltas (out.stdout is nil then);
+      -- unstreamed custom commands leave the whole reply in out.stdout.
+      local text = parser and parser.text() or ''
+      if text == '' then
+        text = out.stdout or ''
+      end
+      local json = text:match '(%b{})'
       local ok, decoded = pcall(vim.json.decode, json or '')
       cb(ok and type(decoded) == 'table' and decoded.steps or nil)
     end)
   end)
+end
+
+--- A live status line under a spinner: `<base>: <latest narration>… <n>s`,
+--- ticking the elapsed seconds every second until stopped. `on_line` swaps in
+--- the newest narration; before any arrives (or for a JSON-only reply) it shows
+--- just `<base>… <n>s`.
+local function ticker(p, base)
+  local start = vim.uv.now()
+  local latest = nil
+  local timer = vim.uv.new_timer()
+  local function paint()
+    local secs = math.floor((vim.uv.now() - start) / 1000)
+    local head = latest and (base .. ': ' .. latest) or base
+    p:report(('%s… %ds'):format(head, secs))
+  end
+  paint()
+  timer:start(1000, 1000, vim.schedule_wrap(paint))
+  return {
+    on_line = function(line)
+      latest = line
+      paint()
+    end,
+    stop = function()
+      if timer then
+        timer:stop()
+        timer:close()
+        timer = nil
+      end
+    end,
+  }
 end
 
 ---@param opts {key: string|integer, sha: string, hunks: prtour.Hunk[], claude_cmd: string[]}
@@ -171,11 +311,12 @@ function M.get(opts, p, cb)
     cb(steps, from_cache)
   end
   local function generate_full()
-    p:report 'asking Claude for a reading order (can take a minute)'
-    run_claude(opts, INSTRUCTIONS, hunks_text(opts.hunks), function(raw)
+    local t = ticker(p, 'ordering hunks with Claude')
+    run_claude(opts, INSTRUCTIONS, hunks_text(opts.hunks), t.on_line, function(raw)
+      t.stop()
       local steps = raw and validate(raw, opts.hunks) or nil
       if not steps then
-        vim.notify('prtour: Claude ordering failed, falling back to file order', vim.log.levels.WARN)
+        vim.notify('prtour: Claude ordering failed or timed out — using file order', vim.log.levels.WARN)
         return cb(fallback_steps(opts.hunks))
       end
       finish(steps)
@@ -214,13 +355,14 @@ function M.get(opts, p, cb)
     return finish(validate(reused, opts.hunks) or fallback_steps(opts.hunks), true)
   end
   -- Only the new hunks need placing — a much smaller Claude job.
-  p:report(('placing %d new hunk%s into the existing tour'):format(#fresh, #fresh == 1 and '' or 's'))
+  local t = ticker(p, ('placing %d new hunk%s into the existing tour'):format(#fresh, #fresh == 1 and '' or 's'))
   local listing = {}
   for i, st in ipairs(reused) do
     listing[#listing + 1] = ('%d. %s'):format(i, st.title)
   end
   local stdin = ('Existing steps:\n%s\n\nNew hunks:\n%s'):format(table.concat(listing, '\n'), hunks_text(fresh))
-  run_claude(opts, INCREMENTAL_INSTRUCTIONS, stdin, function(raw)
+  run_claude(opts, INCREMENTAL_INSTRUCTIONS, stdin, t.on_line, function(raw)
+    t.stop()
     local merged = vim.deepcopy(reused)
     local by_title = {}
     for _, st in ipairs(merged) do
@@ -247,5 +389,11 @@ function M.get(opts, p, cb)
     finish(validate(merged, opts.hunks) or fallback_steps(opts.hunks))
   end)
 end
+
+-- Pure helpers, exposed for tests.
+M._display_line = display_line
+M._extract_delta = extract_delta
+M._validate = validate
+M._fallback_steps = fallback_steps
 
 return M
