@@ -92,12 +92,14 @@ local function render()
   for _, h in ipairs(v.hls) do
     hl.range(D.buf, ns, h.group, { h.line, h.col_start }, { h.line, h.col_end })
   end
-  -- Park the cursor on the first selectable row (or keep it in range).
-  if vim.api.nvim_win_is_valid(D.win) and #v.entries > 0 then
-    local cur = vim.api.nvim_win_get_cursor(D.win)[1]
-    if not D.entry_by_line[cur] then
-      vim.api.nvim_win_set_cursor(D.win, { v.entries[1].line, 0 })
-    end
+  -- Park the cursor on the first selectable row, but only on the first paint.
+  -- The open-PR fetch redraws every ~120ms under the spinner; re-homing on each
+  -- of those ticks would fight the user's own navigation — a cursor resting
+  -- between entries (arrow keys or the mouse land there) got yanked back to the
+  -- top before it could reach, say, the local card below the Resume list.
+  if vim.api.nvim_win_is_valid(D.win) and #v.entries > 0 and not D.homed then
+    vim.api.nvim_win_set_cursor(D.win, { v.entries[1].line, 0 })
+    D.homed = true
   end
 end
 
@@ -263,6 +265,8 @@ function M.open()
     frame = 1,
     entries = {},
     entry_by_line = {},
+    -- Cleared until the first paint parks the cursor on the first row; see render.
+    homed = false,
     -- Dirty-tree local card starts on HEAD (just the uncommitted changes);
     -- <Tab> flips it to the whole branch (vs the default branch).
     local_vs_base = false,
@@ -277,12 +281,19 @@ function M.open()
       end
     end, { buffer = buf })
   end
-  vim.keymap.set('n', 'j', function()
-    move(1)
-  end, { buffer = buf })
-  vim.keymap.set('n', 'k', function()
-    move(-1)
-  end, { buffer = buf })
+  -- Navigation steps between selectable entries, never onto the blank/header
+  -- lines in between. Arrow keys and the mouse wheel move the selection too, so
+  -- "scrolling" the dashboard lands on a row rather than drifting off one.
+  for _, k in ipairs { 'j', '<Down>', '<ScrollWheelDown>' } do
+    vim.keymap.set('n', k, function()
+      move(1)
+    end, { buffer = buf })
+  end
+  for _, k in ipairs { 'k', '<Up>', '<ScrollWheelUp>' } do
+    vim.keymap.set('n', k, function()
+      move(-1)
+    end, { buffer = buf })
+  end
   vim.keymap.set('n', '<CR>', choose_at_cursor, { buffer = buf })
   vim.keymap.set('n', '<Tab>', toggle_local_base, { buffer = buf })
   vim.keymap.set('n', 'r', refresh, { buffer = buf })
