@@ -21,6 +21,7 @@ During a tour: **Enter** = next hunk, **Backspace** = previous hunk. That's ever
 - **Local mode** — review what your AI agent (or you) just changed, before any commit or PR exists. Untracked files included. Queued comments batch into one message fired at a Claude Code tmux pane.
 - **Content-addressed progress** — "seen" is tracked by a hash of each hunk's content, not line positions. Rebases, force-pushes and unrelated edits don't reset your progress; only hunks that actually changed come back unread.
 - **Ask Claude mid-review** — question the hunk under your cursor and get an answer in a float, or fire a change request at a running Claude Code session and keep reading.
+- **The small stuff that adds up** — PR description in a float, CI status in the picker (✓/✗/●), `]u` to jump to the frontier of unseen hunks, refresh-in-place after your agent pushes more changes (comments survive), Claude-drafted review summaries you edit before submitting, and a warning when the diff touches a lockfile so you know to reinstall for accurate LSP.
 
 ## Requirements
 

@@ -62,9 +62,11 @@ local function place_mark(c)
   if not (c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr)) then
     return
   end
+  local util = require('prtour.util')
+  local head = c.start_line and ('┃ 💬 queued (lines %d–%d): '):format(c.start_line, c.line) or '┃ 💬 queued: '
   local virt = {}
-  for bi, bl in ipairs(vim.split(c.body, '\n')) do
-    virt[#virt + 1] = { { (bi == 1 and '┃ 💬 queued: ' or '┃ ') .. bl, 'DiagnosticVirtualTextWarn' } }
+  for bi, bl in ipairs(util.wrap(c.body, util.annotation_width())) do
+    virt[#virt + 1] = { { (bi == 1 and head or '┃ ') .. bl, 'DiagnosticVirtualTextWarn' } }
   end
   -- virt_lines above line 1 render off-screen; put them below instead.
   local ok, id = pcall(vim.api.nvim_buf_set_extmark, c.bufnr, ns, c.line - 1, 0, {
@@ -74,6 +76,22 @@ local function place_mark(c)
   })
   if ok then
     c.extmark_id = id
+  end
+  -- Continue the block's ┃ inline through the referenced line(s), so every
+  -- queued comment shows exactly what it points at. Covered lines indent two
+  -- cells under the bar; the gutter stays gitsigns' territory.
+  for _, mid in ipairs(c.range_mark_ids or {}) do
+    pcall(vim.api.nvim_buf_del_extmark, c.bufnr, ns, mid)
+  end
+  c.range_mark_ids = {}
+  for ln = c.start_line or c.line, c.line do
+    local ok2, rid = pcall(vim.api.nvim_buf_set_extmark, c.bufnr, ns, ln - 1, 0, {
+      virt_text = { { '┃ ', 'DiagnosticVirtualTextWarn' } },
+      virt_text_pos = 'inline',
+    })
+    if ok2 then
+      c.range_mark_ids[#c.range_mark_ids + 1] = rid
+    end
   end
 end
 
@@ -186,8 +204,14 @@ function M.edit_at_cursor()
   vim.keymap.set('n', 'D', function()
     close()
     table.remove(comments, idx)
-    if c.extmark_id and c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr) then
-      vim.api.nvim_buf_del_extmark(c.bufnr, ns, c.extmark_id)
+    if c.bufnr and vim.api.nvim_buf_is_valid(c.bufnr) then
+      local mids = { c.extmark_id }
+      vim.list_extend(mids, c.range_mark_ids or {})
+      for _, mid in ipairs(mids) do
+        if mid then
+          vim.api.nvim_buf_del_extmark(c.bufnr, ns, mid)
+        end
+      end
     end
     vim.notify(('prtour: comment deleted (%d pending)'):format(#comments))
     pcall(function()

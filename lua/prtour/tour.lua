@@ -11,19 +11,30 @@ local ns = vim.api.nvim_create_namespace 'prtour'
 ---@return string[]
 local function wrap_text(text, width)
   local lines, line = {}, ''
+  local function flush()
+    if line ~= '' then
+      lines[#lines + 1] = line
+      line = ''
+    end
+  end
   for word in text:gmatch '%S+' do
+    -- Hard-break words wider than the panel; a soft-wrapped buffer line
+    -- would push the last HUD row out of the float.
+    while vim.fn.strdisplaywidth(word) > width do
+      flush()
+      lines[#lines + 1] = vim.fn.strcharpart(word, 0, width)
+      word = vim.fn.strcharpart(word, width)
+    end
     if line == '' then
       line = word
     elseif vim.fn.strdisplaywidth(line .. ' ' .. word) <= width then
       line = line .. ' ' .. word
     else
-      lines[#lines + 1] = line
+      flush()
       line = word
     end
   end
-  if line ~= '' then
-    lines[#lines + 1] = line
-  end
+  flush()
   return lines
 end
 
@@ -89,9 +100,12 @@ local function define_hls()
   vim.api.nvim_set_hl(0, 'PrtourNext', { fg = fg_of 'Comment', italic = true })
   vim.api.nvim_set_hl(0, 'PrtourAdded', { fg = fg_of 'Added' or fg_of 'String', bold = true })
   vim.api.nvim_set_hl(0, 'PrtourRemoved', { fg = fg_of 'Removed' or fg_of 'Error', bold = true })
+  vim.api.nvim_set_hl(0, 'PrtourFlash', { link = 'IncSearch' })
 end
 
 local saved_maps = {}
+local update_hud_side
+local refresh_threads
 
 --- Run `action`, except in buffers where the key has a real job (quickfix,
 --- cmdline window, terminals...) — there, replay the key unmapped.
@@ -214,6 +228,12 @@ function M.start(opts)
   end
   vim.keymap.set('n', ']f', M.next, { desc = 'prtour: next hunk in tour' })
   vim.keymap.set('n', '[f', M.prev, { desc = 'prtour: previous hunk in tour' })
+  vim.keymap.set('n', ']u', function()
+    M.next_unseen(1)
+  end, { desc = 'prtour: next unseen hunk' })
+  vim.keymap.set('n', '[u', function()
+    M.next_unseen(-1)
+  end, { desc = 'prtour: previous unseen hunk' })
   vim.keymap.set('n', '<CR>', unless_special(M.next, '<CR>'), { desc = 'prtour: next hunk in tour' })
   vim.keymap.set('n', '<BS>', unless_special(M.prev, '<BS>'), { desc = 'prtour: previous hunk in tour' })
   vim.keymap.set('n', '<leader>gc', function()
@@ -241,7 +261,15 @@ function M.start(opts)
     end
   end, { desc = 'prtour: [E]dit/delete your comment at cursor' })
   vim.keymap.set('n', '<leader>gd', toggle_split, { desc = 'prtour: toggle side-by-side [D]iff' })
-  require('prtour.comments').reset()
+  if not opts.preserve_comments then
+    require('prtour.comments').reset()
+  end
+  vim.api.nvim_create_autocmd('CursorMoved', {
+    group = vim.api.nvim_create_augroup('prtour-tour', { clear = true }),
+    callback = function()
+      update_hud_side()
+    end,
+  })
   if opts.pr then
     require('prtour.gh').review_threads(opts.pr, function(list)
     if not (list and state and state.pr == opts.pr) then
@@ -313,6 +341,8 @@ function M.start(opts)
   M.next()
 end
 
+local EVENTS = { approve = 'APPROVE', comment = 'COMMENT', ['request-changes'] = 'REQUEST_CHANGES', pending = nil }
+
 --- Local mode "submit": batch queued comments into one message to a Claude pane.
 ---@param on_done fun()|nil
 local function local_send_comments(on_done)
@@ -345,9 +375,11 @@ local function local_send_comments(on_done)
   end)
 end
 
-local function teardown()
+local function teardown(quiet)
   pcall(vim.keymap.del, 'n', ']f')
   pcall(vim.keymap.del, 'n', '[f')
+  pcall(vim.keymap.del, 'n', ']u')
+  pcall(vim.keymap.del, 'n', '[u')
   pcall(vim.keymap.del, 'n', '<CR>')
   pcall(vim.keymap.del, 'n', '<BS>')
   pcall(vim.keymap.del, 'n', '<leader>gc')
@@ -361,6 +393,7 @@ local function teardown()
     pcall(vim.fn.mapset, 'n', false, m)
   end
   saved_maps = {}
+  pcall(vim.api.nvim_del_augroup_by_name, 'prtour-tour')
   if state.badge_buf and vim.api.nvim_buf_is_valid(state.badge_buf) then
     vim.api.nvim_buf_clear_namespace(state.badge_buf, ns, 0, -1)
   end
@@ -372,7 +405,9 @@ local function teardown()
     pcall(gs.toggle_word_diff, false)
   end
   state = nil
-  vim.notify 'prtour: tour ended'
+  if not quiet then
+    vim.notify 'prtour: tour ended'
+  end
 end
 
 function M.stop()
@@ -409,8 +444,25 @@ function M.stop()
   end)
 end
 
+--- Never render a hunk into a float or terminal (e.g. an open fzf window);
+--- move to a normal window first.
+local function ensure_normal_window()
+  local function normal(w)
+    return vim.api.nvim_win_get_config(w).relative == '' and vim.bo[vim.api.nvim_win_get_buf(w)].buftype == ''
+  end
+  if normal(vim.api.nvim_get_current_win()) then
+    return
+  end
+  for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if normal(w) then
+      return vim.api.nvim_set_current_win(w)
+    end
+  end
+end
+
 ---@param h prtour.Hunk
 local function open_hunk(h)
+  ensure_normal_window()
   if h.deleted then
     -- No local file; show the base version read-only.
     local name = 'prtour://deleted/' .. h.file
@@ -518,8 +570,9 @@ local function show_position()
     { pct, 'PrtourKicker' },
   }
   add { { '' } }
+  local title_hl = state.step_flash and 'PrtourFlash' or 'PrtourTitle'
   for _, l in ipairs(wrap_text(step.title, wrapw)) do
-    add { { ' ' .. l, 'PrtourTitle' } }
+    add { { ' ' .. l, title_hl } }
   end
   if step.note and step.note ~= '' then
     for _, l in ipairs(wrap_text(step.note, wrapw)) do
@@ -560,6 +613,7 @@ local function show_position()
   for _, m in ipairs(marks) do
     hl.range(hud.buf, ns, m[4], { m[1], m[2] }, { m[1], m[3] })
   end
+  hud.w, hud.h = width, #lines
   local cfg = {
     relative = 'editor',
     anchor = 'NE',
@@ -579,6 +633,9 @@ local function show_position()
   else
     hud.win = vim.api.nvim_open_win(hud.buf, false, cfg)
   end
+  vim.wo[hud.win].wrap = false
+  -- On a step change, light up the whole panel, not just the title.
+  vim.wo[hud.win].winhighlight = state.step_flash and 'NormalFloat:PrtourFlash,Normal:PrtourFlash,FloatBorder:PrtourFlash' or ''
 end
 
 local function step_complete(si)
@@ -666,6 +723,19 @@ local function goto_pos(pos)
   local left = state.pos >= 1 and state.flat[state.pos].step or nil
   state.pos = pos
   local h = state.by_id[state.flat[pos].id]
+  -- Flash the HUD title when crossing a step boundary, so the chapter
+  -- change registers even while eyes are on the code.
+  if left and state.flat[pos].step ~= left then
+    state.step_flash = true
+    vim.defer_fn(function()
+      if state and state.pos == pos and state.step_flash then
+        state.step_flash = false
+        show_position()
+      end
+    end, 1500)
+  else
+    state.step_flash = false
+  end
   open_hunk(h)
   track_visited(h)
   show_position()
@@ -682,12 +752,55 @@ function M.next()
   goto_pos((state and state.pos or 0) + 1)
 end
 
+--- Jump to the nearest unseen hunk in the given direction.
+---@param dir 1|-1
+function M.next_unseen(dir)
+  if not state then
+    return
+  end
+  local i = state.pos + dir
+  while i >= 1 and i <= #state.flat do
+    if not state.visited[state.flat[i].id] then
+      return goto_pos(i)
+    end
+    i = i + dir
+  end
+  vim.notify('prtour: no unseen hunks ' .. (dir > 0 and 'ahead' or 'behind'))
+end
+
 function M.prev()
   goto_pos((state and state.pos or 2) - 1)
 end
 
 function M.active()
   return state ~= nil
+end
+
+--- Screen rectangle the HUD currently occupies (nil when closed/hidden).
+function M.hud_rect()
+  if not (state and hud.win and vim.api.nvim_win_is_valid(hud.win) and hud.w) then
+    return nil
+  end
+  return { top = 0, bottom = hud.h + 1, left = vim.o.columns - hud.w - 2 }
+end
+
+--- Hide the HUD while the cursor is under it; bring it back when clear.
+update_hud_side = function()
+  if not (state and hud.w) or state.pos < 1 then
+    return
+  end
+  local sp = vim.fn.screenpos(0, vim.fn.line '.', vim.fn.col '.')
+  if sp.row == 0 then
+    return
+  end
+  local margin = 2
+  local inside = sp.row <= hud.h + 1 + margin and sp.col >= vim.o.columns - hud.w - 2 - margin
+  local visible = hud.win and vim.api.nvim_win_is_valid(hud.win)
+  if inside and visible then
+    close_hud()
+  elseif not inside and not visible then
+    show_position()
+  end
 end
 
 --- Re-render the HUD (e.g. after the comment queue changes).
@@ -760,38 +873,28 @@ function M.actions()
             end
             vim.notify 'prtour: comments saved to pending review'
             M.refresh()
+            refresh_threads()
           end)
         end,
       }
-    else
-      items[#items + 1] = { label = 'send ' .. noun .. ' to Claude', fn = local_send_comments }
     end
+    -- Own-PR reviews: the queue can also go straight to the Claude
+    -- session working on the branch, instead of GitHub.
+    items[#items + 1] = { label = 'send ' .. noun .. ' to Claude', fn = local_send_comments }
   end
   local h = state.pos >= 1 and state.by_id[state.flat[state.pos].id] or nil
   if h then
     items[#items + 1] = {
       label = 'ask Claude about this hunk…',
       fn = function()
-        vim.ui.input({ prompt = 'Ask Claude: ' }, function(q)
-          if not q or q == '' then
-            return
-          end
-          local p = require('prtour.progress').start 'Claude'
-          p:report 'thinking about your question'
-          require('prtour.claude').ask({
-            pr = state.pr,
-            file = h.file,
-            start_line = h.start_line,
-            line_count = h.line_count,
-            diff = table.concat(h.lines, '\n'),
-          }, q, function(answer, err)
-            if not answer then
-              return p:fail('ask failed: ' .. err)
-            end
-            p:finish()
-            require('prtour.claude').show_answer(q, answer)
-          end)
-        end)
+        require('prtour.claude').ask_flow {
+          pr = state.pr,
+          label = state.label,
+          file = h.file,
+          start_line = h.start_line,
+          line_count = h.line_count,
+          diff = table.concat(h.lines, '\n'),
+        }
       end,
     }
     items[#items + 1] = {
@@ -816,6 +919,104 @@ function M.actions()
     }
   end
   items[#items + 1] = { label = 'tour outline', hint = ld .. 'go', fn = M.outline }
+  items[#items + 1] = {
+    label = 'jump to next unseen hunk',
+    hint = ']u',
+    fn = function()
+      M.next_unseen(1)
+    end,
+  }
+  if state.pr then
+    items[#items + 1] = {
+      label = 'show PR description',
+      fn = function()
+        if state.pr_desc then
+          return require('prtour.claude').show_answer(state.pr_desc.title, state.pr_desc.body)
+        end
+        require('prtour.gh').pr_view(state.pr, function(d, err)
+          if not d then
+            return vim.notify('prtour: ' .. (err or '?'), vim.log.levels.ERROR)
+          end
+          local body = d.body
+          body = (body == vim.NIL or body == nil or body == '') and '(no description)' or tostring(body):gsub('\r', '')
+          d.body = body
+          if state then
+            state.pr_desc = d
+          end
+          require('prtour.claude').show_answer(d.title, body)
+        end)
+      end,
+    }
+  else
+    items[#items + 1] = {
+      label = 'refresh — re-scan local changes',
+      fn = function()
+        local base_arg = state.resume and state.resume.base_arg or nil
+        teardown(true)
+        require('prtour').start_local(base_arg, { preserve_comments = true })
+      end,
+    }
+  end
+  if state.pr and comments.count() > 0 then
+    items[#items + 1] = {
+      label = 'draft summary with Claude & submit…',
+      fn = function()
+        local p = require('prtour.progress').start 'Claude'
+        p:report 'drafting review summary from your comments'
+        local clines = {}
+        for _, c in ipairs(comments.all()) do
+          clines[#clines + 1] = ('%s:%d — %s'):format(c.path, c.line, c.body)
+        end
+        require('prtour.claude').draft_summary(state.label, table.concat(clines, '\n'), function(draft, err)
+          if not draft then
+            return p:fail('draft failed: ' .. err)
+          end
+          p:finish()
+          local buf = vim.api.nvim_create_buf(false, true)
+          vim.bo[buf].filetype = 'markdown'
+          vim.bo[buf].bufhidden = 'wipe'
+          vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(draft, '\n'))
+          local width, height = 72, 12
+          local win = vim.api.nvim_open_win(buf, true, {
+            relative = 'editor',
+            row = math.floor((vim.o.lines - height) / 2),
+            col = math.floor((vim.o.columns - width) / 2),
+            width = width,
+            height = height,
+            style = 'minimal',
+            border = 'rounded',
+            title = ' review summary · edit freely · <CR> submit · q discard ',
+            title_pos = 'center',
+          })
+          vim.wo[win].wrap = true
+          vim.wo[win].linebreak = true
+          local function close()
+            if vim.api.nvim_win_is_valid(win) then
+              vim.api.nvim_win_close(win, true)
+            end
+          end
+          vim.keymap.set('n', 'q', close, { buffer = buf })
+          vim.keymap.set('n', '<CR>', function()
+            local body = vim.trim(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\n'))
+            close()
+            vim.ui.select({ 'comment', 'approve', 'request-changes', 'pending' }, { prompt = 'Submit review as' }, function(kind)
+              if not kind then
+                return
+              end
+              comments.submit({ pr = state.pr, pr_id = state.pr_id, event = EVENTS[kind], body = body }, function(ok, err2)
+                if not ok then
+                  return vim.notify('prtour: review submit failed: ' .. err2, vim.log.levels.ERROR)
+                end
+                vim.notify(('prtour: review submitted (%s)'):format(kind))
+                M.refresh()
+                refresh_threads()
+              end)
+            end)
+          end, { buffer = buf })
+        end)
+      end,
+    }
+  end
   if state.pr then
     items[#items + 1] = {
       label = 'submit review…',
@@ -857,7 +1058,26 @@ function M.outline()
   end)
 end
 
-local EVENTS = { approve = 'APPROVE', comment = 'COMMENT', ['request-changes'] = 'REQUEST_CHANGES', pending = nil }
+--- Refetch GitHub threads and re-render them at the current hunk, so
+--- freshly uploaded comments reappear inline as pending thread comments.
+refresh_threads = function()
+  if not (state and state.pr) then
+    return
+  end
+  local pr = state.pr
+  require('prtour.gh').review_threads(pr, function(list)
+    if not (list and state and state.pr == pr) then
+      return
+    end
+    require('prtour.threads').set(list)
+    if state.pos >= 1 then
+      local h = state.by_id[state.flat[state.pos].id]
+      if h and not h.deleted then
+        require('prtour.threads').decorate(vim.api.nvim_get_current_buf(), h.file)
+      end
+    end
+  end)
+end
 
 --- Submit queued comments (and verdict) as one GitHub review.
 ---@param kind string|nil approve | comment | request-changes | pending (default comment)
@@ -882,6 +1102,8 @@ function M.submit(kind)
         return vim.notify('prtour: review submit failed: ' .. err, vim.log.levels.ERROR)
       end
       vim.notify(('prtour: review submitted (%s)'):format(kind))
+      M.refresh()
+      refresh_threads()
     end)
   end)
 end

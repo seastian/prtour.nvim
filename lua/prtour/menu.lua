@@ -44,10 +44,29 @@ function M.open(items)
       hl.range(buf, ns, 'PrtourDim', { i - 1, #lines[i] - #r.hint - 1 }, { i - 1, -1 })
     end
   end
+  -- Dodge the HUD: shift left of it, or drop below it, never overlap.
+  local row_off, col_off = 1, 0
+  local ok_tour, tour = pcall(require, 'prtour.tour')
+  local rect = ok_tour and tour.hud_rect and tour.hud_rect() or nil
+  if rect then
+    local sp = vim.fn.screenpos(0, vim.fn.line '.', vim.fn.col '.')
+    local top = sp.row + row_off
+    local bottom = top + #items + 1
+    local left = sp.col - 1
+    local right = left + width + 1
+    if bottom >= rect.top - 1 and top <= rect.bottom + 1 and right >= rect.left then
+      col_off = rect.left - right - 1
+      if left + col_off < 0 then
+        -- No room to the left; open below the HUD instead.
+        col_off = 0
+        row_off = rect.bottom + 2 - sp.row
+      end
+    end
+  end
   local win = vim.api.nvim_open_win(buf, true, {
     relative = 'cursor',
-    row = 1,
-    col = 0,
+    row = row_off,
+    col = col_off,
     width = width,
     height = #items,
     style = 'minimal',

@@ -1,0 +1,79 @@
+*prtour.txt*  Review PRs and local changes as a guided tour
+
+==============================================================================
+INTRODUCTION                                                          *prtour*
+
+prtour.nvim walks you through a diff hunk-by-hunk in an order that tells a
+story: Claude Code groups the hunks into titled steps (types first, then
+logic, then call sites, mechanical churn last). You read real working-tree
+buffers, so LSP works everywhere. Comments become a GitHub review; on local
+changes they are sent to the Claude Code session that wrote the code.
+
+==============================================================================
+KEYS                                                             *prtour-keys*
+
+`\` is the whole interface: >
+  \            outside a tour: launcher (resume / PR / local changes)
+               inside a tour:  context menu of applicable actions
+  <CR>         next hunk
+  <BS>         previous hunk
+<
+Every menu action also has a direct chord, shown beside it in the menu:
+`]u` / `[u` next/previous unseen hunk, <leader>gc comment, <leader>ge
+edit/delete your comment, <leader>gr reply, <leader>gd toggle side-by-side
+diff, <leader>go outline, <leader>gq quit.
+
+==============================================================================
+COMMANDS                                                     *prtour-commands*
+
+                                                                     *:PrTour*
+:PrTour [N]           Pick an open PR (or use number N), check it out and
+                      start the tour. If the PR branch is held by another
+                      worktree, its head is reviewed detached.
+
+                                                               *:PrTour-local*
+:PrTour local [base]  Tour uncommitted changes (working tree vs HEAD), or vs
+                      the merge-base of {base} when given. Untracked files
+                      are included.
+
+                                                                 *:PrTourStop*
+:PrTourStop           End the tour. Prompts about unsubmitted comments.
+
+                                                               *:PrTourSubmit*
+:PrTourSubmit [kind]  Submit queued comments as one GitHub review; {kind} is
+                      comment (default), approve, request-changes or pending.
+                      "pending" saves them server-side without notifying the
+                      author — usable repeatedly mid-review.
+
+==============================================================================
+CONFIGURATION                                                  *prtour-config*
+
+Defaults: >lua
+  require('prtour').setup {
+    base = nil,             -- diff base; nil = repo default branch
+    mark_viewed = true,     -- sync GitHub's per-file viewed checkboxes
+    claude_cmd = { 'claude', '-p' },
+    models = {
+      manifest = 'claude-sonnet-5',
+      ask = 'claude-sonnet-5',
+    },
+  }
+<
+==============================================================================
+HIGHLIGHTS                                                 *prtour-highlights*
+
+Derived from the active colorscheme; override after setup: PrtourTitle,
+PrtourKicker, PrtourDim, PrtourKey, PrtourNext, PrtourAdded, PrtourRemoved,
+PrtourFlash (the step-change flash; links to IncSearch).
+
+==============================================================================
+NOTES                                                           *prtour-notes*
+
+- Progress is content-addressed: a hunk counts as seen by the hash of its
+  content, so rebases, force-pushes and unrelated edits don't reset it.
+- Reading order manifests are cached per diff under
+  stdpath('cache')/prtour/; caches older than 45 days are pruned.
+- :checkhealth prtour verifies all external dependencies (load the plugin
+  first, e.g. by pressing \ once).
+
+vim:tw=78:ts=8:noet:ft=help:norl:

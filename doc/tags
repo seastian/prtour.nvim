@@ -1,0 +1,11 @@
+:PrTour	prtour.txt	/*:PrTour*
+:PrTour-local	prtour.txt	/*:PrTour-local*
+:PrTourStop	prtour.txt	/*:PrTourStop*
+:PrTourSubmit	prtour.txt	/*:PrTourSubmit*
+prtour	prtour.txt	/*prtour*
+prtour-commands	prtour.txt	/*prtour-commands*
+prtour-config	prtour.txt	/*prtour-config*
+prtour-highlights	prtour.txt	/*prtour-highlights*
+prtour-keys	prtour.txt	/*prtour-keys*
+prtour-notes	prtour.txt	/*prtour-notes*
+prtour.txt	prtour.txt	/*prtour.txt*

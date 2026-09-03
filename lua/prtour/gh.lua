@@ -17,7 +17,7 @@ end
 
 ---@param cb fun(prs: table[]|nil, err: string|nil)
 function M.list_prs(cb)
-  run({ 'gh', 'pr', 'list', '--json', 'number,title,author,headRefName,isDraft,additions,deletions' }, function(stdout, err)
+  run({ 'gh', 'pr', 'list', '--json', 'number,title,author,headRefName,isDraft,additions,deletions,statusCheckRollup' }, function(stdout, err)
     if not stdout then
       return cb(nil, err)
     end
@@ -96,11 +96,28 @@ function M.head_sha(cb)
   end)
 end
 
---- PR head commit and GraphQL node id in one API call.
+--- PR title, body, author (for the description view).
 ---@param number integer
----@param cb fun(meta: {head_oid: string, id: string}|nil, err: string|nil)
+---@param cb fun(desc: {title: string, body: string, url: string}|nil, err: string|nil)
+function M.pr_view(number, cb)
+  run({ 'gh', 'pr', 'view', tostring(number), '--json', 'title,body,url' }, function(stdout, err)
+    if not stdout then
+      return cb(nil, err)
+    end
+    local ok, d = pcall(vim.json.decode, stdout)
+    if ok and type(d) == 'table' then
+      cb(d, nil)
+    else
+      cb(nil, 'could not parse pr view output')
+    end
+  end)
+end
+
+--- PR head commit, GraphQL node id and declared base branch in one API call.
+---@param number integer
+---@param cb fun(meta: {head_oid: string, id: string, base_ref: string|nil}|nil, err: string|nil)
 function M.pr_meta(number, cb)
-  run({ 'gh', 'pr', 'view', tostring(number), '--json', 'headRefOid,id' }, function(stdout, err)
+  run({ 'gh', 'pr', 'view', tostring(number), '--json', 'headRefOid,id,baseRefName' }, function(stdout, err)
     if not stdout then
       return cb(nil, err)
     end
@@ -108,7 +125,7 @@ function M.pr_meta(number, cb)
     if not ok or type(meta) ~= 'table' then
       return cb(nil, 'could not parse pr view output')
     end
-    cb({ head_oid = meta.headRefOid, id = meta.id }, nil)
+    cb({ head_oid = meta.headRefOid, id = meta.id, base_ref = meta.baseRefName }, nil)
   end)
 end
 
@@ -143,7 +160,11 @@ local function repo_slug(cb)
         return cb(nil, nil, err)
       end
       local o, n = vim.trim(stdout2):match '^(%S+) (%S+)$'
-      cb(o, n, o and nil or 'could not resolve repo owner/name')
+      if o then
+        cb(o, n, nil)
+      else
+        cb(nil, nil, 'could not resolve repo owner/name')
+      end
     end)
   end)
 end
@@ -195,7 +216,7 @@ function M.review_threads(number, cb)
     end
     run({
       'gh', 'api', 'graphql', '--paginate',
-      '-f', 'query=query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line comments(first: 30) { nodes { id body databaseId state viewerDidAuthor author { login } } } } } } } }',
+      '-f', 'query=query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line startLine comments(first: 30) { nodes { id body databaseId state viewerDidAuthor author { login } } } } } } } }',
       '-f', 'owner=' .. owner,
       '-f', 'name=' .. name,
       '-F', 'number=' .. number,
@@ -222,6 +243,7 @@ function M.review_threads(number, cb)
           threads[#threads + 1] = {
             path = node.path,
             line = node.line,
+            start_line = node.startLine ~= vim.NIL and node.startLine or nil,
             is_resolved = node.isResolved,
             is_outdated = node.isOutdated,
             comments = comments,

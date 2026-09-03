@@ -28,13 +28,32 @@ end
 ---@param buf integer
 ---@param path string repo-relative path
 function M.decorate(buf, path)
+  local util = require('prtour.util')
+  local width = util.annotation_width()
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   for _, t in ipairs(by_path[path] or {}) do
     local virt = {}
-    for _, c in ipairs(t.comments) do
+    for ci, c in ipairs(t.comments) do
       local tag = c.pending and ' · pending' or ''
-      local first = vim.split(c.body, '\n')[1]:sub(1, 110)
-      virt[#virt + 1] = { { ('┃ 💬 %s%s: %s'):format(c.author, tag, first), c.pending and 'DiagnosticVirtualTextWarn' or 'DiagnosticVirtualTextInfo' } }
+      if ci == 1 and t.start_line then
+        tag = tag .. (' (lines %d–%d)'):format(t.start_line, t.line)
+      end
+      local hl = c.pending and 'DiagnosticVirtualTextWarn' or 'DiagnosticVirtualTextInfo'
+      for bi, bl in ipairs(util.wrap(c.body, width)) do
+        local prefix = bi == 1 and ('┃ 💬 %s%s: '):format(c.author, tag) or '┃ '
+        virt[#virt + 1] = { { prefix .. bl, hl } }
+      end
+    end
+    if t.start_line then
+      -- Continue the block's ┃ inline through the covered lines.
+      local bar_hl = t.comments[1] and t.comments[1].pending and 'DiagnosticVirtualTextWarn' or 'DiagnosticVirtualTextInfo'
+      local last = math.min(t.line, vim.api.nvim_buf_line_count(buf))
+      for ln = t.start_line, last do
+        pcall(vim.api.nvim_buf_set_extmark, buf, ns, ln - 1, 0, {
+          virt_text = { { '┃ ', bar_hl } },
+          virt_text_pos = 'inline',
+        })
+      end
     end
     if t.is_outdated then
       virt[#virt + 1] = { { '┃ (outdated — code has changed since)', 'NonText' } }

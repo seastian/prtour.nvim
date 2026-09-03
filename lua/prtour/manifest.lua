@@ -19,10 +19,49 @@ Reply with ONLY a JSON object, no prose, no code fences:
 Every hunk id must appear exactly once across all steps.
 ]]
 
-local function cache_path(key, sha)
+local INCREMENTAL_INSTRUCTIONS = [[
+stdin lists the existing steps of a code-review tour, followed by NEW diff hunks that appeared since the tour was planned (each introduced by '### hunk <id> - <file>:<line>').
+Assign every new hunk to the step where a reviewer should meet it: reply with the existing step's title VERBATIM to append there, or invent a new step.
+Reply with ONLY a JSON object, no prose, no code fences:
+{"steps":[{"title":"existing title verbatim OR new step title","note":"only for new steps","hunks":[<new hunk ids>]}]}
+Every new hunk id must appear exactly once.
+]]
+
+local function cache_path(key)
   local dir = vim.fn.stdpath 'cache' .. '/prtour'
   vim.fn.mkdir(dir, 'p')
-  return ('%s/manifest-%s-%s.json'):format(dir, key, sha)
+  return ('%s/manifest-%s.json'):format(dir, key)
+end
+
+---@param path string
+---@return {sha: string, steps: table[]}|nil
+local function read_cache(path)
+  local f = io.open(path, 'r')
+  if not f then
+    return nil
+  end
+  local ok, saved = pcall(vim.json.decode, f:read '*a')
+  f:close()
+  return ok and type(saved) == 'table' and type(saved.steps) == 'table' and saved or nil
+end
+
+--- Persist steps keyed by hunk HASH, so assignments survive re-diffs.
+local function write_cache(path, sha, steps, by_id)
+  local out = {}
+  for _, st in ipairs(steps) do
+    local hashes = {}
+    for _, id in ipairs(st.hunks) do
+      if by_id[id] then
+        hashes[#hashes + 1] = by_id[id].hash
+      end
+    end
+    out[#out + 1] = { title = st.title, note = st.note, hunks = hashes }
+  end
+  local f = io.open(path, 'w')
+  if f then
+    f:write(vim.json.encode { sha = sha, steps = out })
+    f:close()
+  end
 end
 
 ---@param hunks prtour.Hunk[]
@@ -96,47 +135,116 @@ local function validate(steps, hunks)
   return #out > 0 and out or nil
 end
 
----@param opts {key: string|integer, sha: string, hunks: prtour.Hunk[], claude_cmd: string[]}
----@param p prtour.Progress
----@param cb fun(steps: prtour.Step[], from_cache: boolean|nil)
-function M.get(opts, p, cb)
-  local path = cache_path(tostring(opts.key or opts.pr), opts.sha)
-  local f = io.open(path, 'r')
-  if f then
-    local ok, cached = pcall(vim.json.decode, f:read '*a')
-    f:close()
-    local steps = ok and validate(cached, opts.hunks) or nil
-    if steps then
-      return cb(steps, true)
-    end
-  end
-  p:report 'asking Claude for a reading order (can take a minute)'
+local function run_claude(opts, instructions, stdin, cb)
   local cmd = vim.deepcopy(opts.claude_cmd or { 'claude', '-p' })
-  cmd[#cmd + 1] = INSTRUCTIONS
+  cmd[#cmd + 1] = instructions
   local model = (require('prtour').config.models or {}).manifest
   if model then
     cmd[#cmd + 1] = '--model=' .. model
   end
-  vim.system(cmd, { text = true, stdin = hunks_text(opts.hunks) }, function(out)
+  vim.system(cmd, { text = true, stdin = stdin }, function(out)
     vim.schedule(function()
-      local steps
-      if out.code == 0 then
-        local json = (out.stdout or ''):match '(%b{})'
-        local ok, decoded = pcall(vim.json.decode, json or '')
-        steps = ok and validate(decoded and decoded.steps, opts.hunks) or nil
+      if out.code ~= 0 then
+        return cb(nil)
       end
-      if steps then
-        local wf = io.open(path, 'w')
-        if wf then
-          wf:write(vim.json.encode(steps))
-          wf:close()
-        end
-      else
-        vim.notify('prtour: Claude ordering failed, falling back to file order', vim.log.levels.WARN)
-        steps = fallback_steps(opts.hunks)
-      end
-      cb(steps)
+      local json = (out.stdout or ''):match '(%b{})'
+      local ok, decoded = pcall(vim.json.decode, json or '')
+      cb(ok and type(decoded) == 'table' and decoded.steps or nil)
     end)
+  end)
+end
+
+---@param opts {key: string|integer, sha: string, hunks: prtour.Hunk[], claude_cmd: string[]}
+---@param p prtour.Progress
+---@param cb fun(steps: prtour.Step[], from_cache: boolean|nil)
+function M.get(opts, p, cb)
+  local path = cache_path(tostring(opts.key or opts.pr))
+  local by_id, hash_to_id = {}, {}
+  for _, h in ipairs(opts.hunks) do
+    by_id[h.id] = h
+    if hash_to_id[h.hash] == nil then
+      hash_to_id[h.hash] = h.id
+    end
+  end
+  local function finish(steps, from_cache)
+    write_cache(path, opts.sha, steps, by_id)
+    cb(steps, from_cache)
+  end
+  local function generate_full()
+    p:report 'asking Claude for a reading order (can take a minute)'
+    run_claude(opts, INSTRUCTIONS, hunks_text(opts.hunks), function(raw)
+      local steps = raw and validate(raw, opts.hunks) or nil
+      if not steps then
+        vim.notify('prtour: Claude ordering failed, falling back to file order', vim.log.levels.WARN)
+        return cb(fallback_steps(opts.hunks))
+      end
+      finish(steps)
+    end)
+  end
+  -- Reuse: translate the saved manifest's hash-keyed steps onto this diff.
+  local saved = read_cache(path)
+  if not saved then
+    return generate_full()
+  end
+  local reused, used = {}, {}
+  for _, st in ipairs(saved.steps) do
+    local ids = {}
+    for _, hash in ipairs(st.hunks or {}) do
+      local id = hash_to_id[hash]
+      if id and not used[id] then
+        used[id] = true
+        ids[#ids + 1] = id
+      end
+    end
+    if #ids > 0 then
+      reused[#reused + 1] = { title = st.title, note = st.note, hunks = ids }
+    end
+  end
+  local fresh = {}
+  for _, h in ipairs(opts.hunks) do
+    if not used[h.id] then
+      fresh[#fresh + 1] = h
+    end
+  end
+  if #reused == 0 then
+    return generate_full()
+  end
+  if #fresh == 0 then
+    -- Every hunk already has a place; pure translation, instant.
+    return finish(validate(reused, opts.hunks) or fallback_steps(opts.hunks), true)
+  end
+  -- Only the new hunks need placing — a much smaller Claude job.
+  p:report(('placing %d new hunk%s into the existing tour'):format(#fresh, #fresh == 1 and '' or 's'))
+  local listing = {}
+  for i, st in ipairs(reused) do
+    listing[#listing + 1] = ('%d. %s'):format(i, st.title)
+  end
+  local stdin = ('Existing steps:\n%s\n\nNew hunks:\n%s'):format(table.concat(listing, '\n'), hunks_text(fresh))
+  run_claude(opts, INCREMENTAL_INSTRUCTIONS, stdin, function(raw)
+    local merged = vim.deepcopy(reused)
+    local by_title = {}
+    for _, st in ipairs(merged) do
+      by_title[vim.trim(st.title)] = st
+    end
+    if type(raw) == 'table' then
+      for _, st in ipairs(raw) do
+        if type(st) == 'table' and type(st.title) == 'string' and type(st.hunks) == 'table' then
+          local target = by_title[vim.trim(st.title)]
+          if target then
+            vim.list_extend(target.hunks, st.hunks)
+          else
+            merged[#merged + 1] = { title = st.title, note = st.note, hunks = st.hunks }
+            by_title[vim.trim(st.title)] = merged[#merged]
+          end
+        end
+      end
+    else
+      -- Claude unavailable: keep the tour, group the new work visibly.
+      merged[#merged + 1] = { title = 'New since last review', hunks = vim.tbl_map(function(h)
+        return h.id
+      end, fresh) }
+    end
+    finish(validate(merged, opts.hunks) or fallback_steps(opts.hunks))
   end)
 end
 
