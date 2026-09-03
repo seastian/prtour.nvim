@@ -30,7 +30,7 @@ Two progress figures for a tour. *Walked-here* = hunks stepped through in this t
 A tour of an open GitHub pull request, checked out locally and diffed against its base.
 
 **Local review**:
-A tour of local changes before any PR exists, diffed against a base. When the working tree is dirty the base is `HEAD` (review uncommitted changes); when it's clean the base is the merge-base of the default branch (review the branch so far), and another base may be chosen. Untracked files are included.
+A tour of local changes before any PR exists, diffed against a base. When the working tree is dirty the base defaults to `HEAD` (review just the uncommitted changes) but can be toggled (`<Tab>` on the dashboard card) to the default branch (review the whole branch — committed work plus the dirt); when it's clean the base is the merge-base of the default branch (review the branch so far), and another base may be chosen. Untracked files are included.
 _Avoid_: local mode
 
 **Launcher**:
@@ -40,4 +40,4 @@ What the `\` key opens outside a tour: the entry screen for starting or resuming
 The dashboard section listing this repo's unfinished tours (PR tours and local reviews with progress still saved), most-recently-worked-first and capped to the last ~10, so any can be continued where it was left off. No manual delete; stale entries age out via the cache pruner.
 
 **Start (section)**:
-The dashboard section listing fresh tours you could begin now: open GitHub PRs, and a local-review card (working tree vs `HEAD` when dirty, else `HEAD` vs the default branch).
+The dashboard section listing fresh tours you could begin now: open GitHub PRs, and a local-review card (working tree vs `HEAD` when dirty — `<Tab>`-toggleable to vs the default branch — else `HEAD` vs the default branch).

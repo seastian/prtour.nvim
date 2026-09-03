@@ -69,7 +69,11 @@ local function render()
     records = D.records,
     prs = D.prs,
     git = D.git,
+    local_vs_base = D.local_vs_base,
   }
+  -- Stash the built local card so the <Tab> handler knows whether toggling
+  -- between HEAD and the default branch is even offered on this tree.
+  D.local_card = m.start.local_card
   local v = view.render(m, {
     repo = D.repo,
     now = os.time(),
@@ -198,6 +202,17 @@ local function move(dir)
   vim.api.nvim_win_set_cursor(D.win, { target.line, 0 })
 end
 
+--- Flip the local card's compare target (working tree vs HEAD ⇄ vs the default
+--- branch) and redraw. A no-op unless the current card offers the toggle — only
+--- a dirty tree with a resolvable default branch does.
+local function toggle_local_base()
+  if not (D and D.local_card and D.local_card.toggleable) then
+    return
+  end
+  D.local_vs_base = not D.local_vs_base
+  render()
+end
+
 --- Re-scan local state and re-fetch PRs, then redraw.
 local function refresh()
   if not D then
@@ -248,6 +263,9 @@ function M.open()
     frame = 1,
     entries = {},
     entry_by_line = {},
+    -- Dirty-tree local card starts on HEAD (just the uncommitted changes);
+    -- <Tab> flips it to the whole branch (vs the default branch).
+    local_vs_base = false,
   }
   D.records = read_records(D.slug)
 
@@ -266,6 +284,7 @@ function M.open()
     move(-1)
   end, { buffer = buf })
   vim.keymap.set('n', '<CR>', choose_at_cursor, { buffer = buf })
+  vim.keymap.set('n', '<Tab>', toggle_local_base, { buffer = buf })
   vim.keymap.set('n', 'r', refresh, { buffer = buf })
   for _, k in ipairs { 'q', '<Esc>', '\\' } do
     vim.keymap.set('n', k, close, { buffer = buf })

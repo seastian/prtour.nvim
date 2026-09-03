@@ -15,6 +15,10 @@
 --                           async fetch is still in flight
 --   git             table   { branch, dirty (bool), default_base (e.g.
 --                           'origin/main') }
+--   local_vs_base   bool    on a dirty tree, pick the local card's compare
+--                           target: false/nil → working tree vs HEAD (just the
+--                           uncommitted changes), true → vs the default branch
+--                           (the whole branch). Ignored on a clean tree.
 --
 -- Output: { loading, resume, start = { prs, local_card } }. See CONTEXT.md for
 -- the Resume/Start vocabulary. Coverage joins the two progress figures of
@@ -196,13 +200,33 @@ function M.build(inputs)
     end
   end
 
-  -- The local card adapts to the working tree — HEAD when dirty, else the
-  -- default branch — and is always selectable.
-  local local_card = {
-    base = git.dirty and 'HEAD' or git.default_base,
-    base_arg = git.dirty and nil or git.default_base,
-    dirty = git.dirty or false,
-  }
+  -- The local card adapts to the working tree, and is always selectable. On a
+  -- clean tree only "vs the default branch" carries content — the working tree
+  -- equals HEAD, so "vs HEAD" would be empty — so the card is fixed. On a dirty
+  -- tree both targets are meaningful: "vs HEAD" reviews just the uncommitted
+  -- changes, "vs the default branch" reviews the whole branch (committed work
+  -- plus the dirt). The card is then toggleable and `local_vs_base` picks which
+  -- is offered; `alt` names the *other* target for the toggle hint. Toggling
+  -- needs a resolvable default branch — without one the card stays on HEAD.
+  local local_card
+  if git.dirty then
+    local can_toggle = git.default_base ~= nil
+    local vs_base = can_toggle and inputs.local_vs_base == true
+    local_card = {
+      dirty = true,
+      toggleable = can_toggle,
+      base = vs_base and git.default_base or 'HEAD',
+      base_arg = vs_base and git.default_base or nil,
+      alt = vs_base and 'HEAD' or git.default_base,
+    }
+  else
+    local_card = {
+      dirty = false,
+      toggleable = false,
+      base = git.default_base,
+      base_arg = git.default_base,
+    }
+  end
 
   return {
     loading = inputs.prs == nil,

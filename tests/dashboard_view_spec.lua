@@ -119,6 +119,29 @@ describe('dashboard view — sections', function()
     ok(has_line(clean, 'origin/main'), 'clean card names the default branch')
   end)
 
+  it('shows the toggle hint on a toggleable dirty card, naming the other target', function()
+    local r = render(model {
+      start = { prs = {}, local_card = { base = 'HEAD', base_arg = nil, dirty = true, toggleable = true, alt = 'origin/main' } },
+    })
+    ok(has_line(r, 'working tree vs HEAD'), 'shows the current target')
+    ok(has_line(r, 'Tab'), 'and hints at the <Tab> toggle')
+    ok(has_line(r, 'vs origin/main'), 'naming the other (default-branch) target')
+  end)
+
+  it('renders the dirty card against the default branch once toggled', function()
+    local r = render(model {
+      start = { prs = {}, local_card = { base = 'origin/main', base_arg = 'origin/main', dirty = true, toggleable = true, alt = 'HEAD' } },
+    })
+    ok(has_line(r, 'working tree vs origin/main'), 'diffs the working tree against the branch base')
+    ok(has_line(r, 'Tab'), 'and offers to toggle back')
+    eq(entry_for(r, 'start_local').select.base_arg, 'origin/main')
+  end)
+
+  it('omits the toggle hint when the dirty card is not toggleable', function()
+    local r = render(model { start = { prs = {}, local_card = { base = 'HEAD', base_arg = nil, dirty = true, toggleable = false } } })
+    ok(not has_line(r, 'Tab'), 'no toggle offered without a resolvable default branch')
+  end)
+
   it('degrades the clean card rather than crashing when the base is unknown', function()
     -- No `origin/HEAD` → the model passes a nil base straight through; the
     -- view must still render (LuaJIT's string.format('%s', nil) would error).

@@ -173,7 +173,7 @@ end
 --- `origin/HEAD`), `base` is nil — degrade the label rather than crash.
 local function local_body(card)
   if card.dirty then
-    return 'local  ·  working tree vs HEAD'
+    return ('local  ·  working tree vs %s'):format(card.base or 'HEAD')
   end
   return ('local  ·  HEAD vs %s'):format(card.base or 'default branch')
 end
@@ -222,7 +222,12 @@ function M.render(model, opts)
   -- Start — always shown: the local card is local data and renders instantly.
   b:hl(b:push 'Start', 0, #'Start', 'PrtourTitle')
   local card = model.start.local_card
-  b:entry(local_body(card), { action = 'start_local', base_arg = card.base_arg })
+  local card_line = b:entry(local_body(card), { action = 'start_local', base_arg = card.base_arg })
+  -- A dirty tree can be reviewed against either HEAD or the default branch; the
+  -- dim hint names the other target and the <Tab> that flips to it.
+  if card.toggleable then
+    b:tag(card_line, ('Tab → vs %s'):format(card.alt), 'PrtourDim')
+  end
 
   if model.loading then
     -- Spinner row: not selectable, no number. PRs stream in on refresh.
