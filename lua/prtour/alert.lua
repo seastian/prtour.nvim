@@ -6,9 +6,6 @@ local M = {}
 function M.ping(msg)
   -- Terminal bell: tmux flags the window (monitor-bell), terminals may bounce.
   pcall(vim.fn.chansend, vim.v.stderr, '\a')
-  if vim.fn.executable 'osascript' == 1 then
-    vim.system { 'osascript', '-e', ('display notification %q with title "prtour"'):format(msg) }
-  end
   if vim.env.TMUX and vim.fn.executable 'tmux' == 1 then
     vim.system { 'tmux', 'display-message', 'prtour: ' .. msg }
   end
