@@ -39,12 +39,18 @@ lazy.nvim:
 ```lua
 {
   'seastian/prtour.nvim',
+  dependencies = {
+    'lewis6991/gitsigns.nvim',   -- required: inline diff rendering
+    -- 'j-hui/fidget.nvim',      -- optional: spinner UI for progress; without it, status shows on the command line
+  },
   keys = {
     { '\\', function() require('prtour').launcher() end, desc = 'PR tour: launcher / actions' },
   },
   opts = {},
 }
 ```
+
+`gh` (authenticated), and optionally `claude` and `tmux`, are system tools — install them yourself; lazy.nvim can't.
 
 ## Usage
 
