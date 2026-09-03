@@ -27,7 +27,6 @@ During a tour: **Enter** = next hunk, **Backspace** = previous hunk. That's ever
 
 - Neovim ≥ 0.10
 - [gitsigns.nvim](https://github.com/lewis6991/gitsigns.nvim) — inline diff rendering
-- [fzf-lua](https://github.com/ibhagwan/fzf-lua) — PR picker
 - [`gh`](https://cli.github.com/) authenticated — all GitHub interaction
 - [Claude Code](https://claude.com/claude-code) CLI — optional; without it, tours fall back to file order and the ask/handoff actions are unavailable
 - tmux — optional; only for handing change requests to a running Claude Code pane
@@ -53,7 +52,7 @@ Press `\` and pick. Or use the commands directly:
 
 | Command | What it does |
 | --- | --- |
-| `:PrTour` | pick an open PR, check it out, start the tour |
+| `:PrTour` | open the dashboard (same as `\`) — resume or start a tour |
 | `:PrTour 1234` | tour a specific PR |
 | `:PrTour local` | tour uncommitted changes (working tree vs `HEAD`) |
 | `:PrTour local master` | tour the whole branch + working tree vs the merge-base |

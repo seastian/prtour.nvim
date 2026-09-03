@@ -20,12 +20,6 @@ function M.check()
     health.error 'gitsigns.nvim not found — required for inline diff rendering'
   end
 
-  if pcall(require, 'fzf-lua') then
-    health.ok 'fzf-lua found'
-  else
-    health.warn 'fzf-lua not found — the PR picker will not work (:PrTour <number> and local mode still do)'
-  end
-
   if has_exe 'git' then
     health.ok 'git found'
   else
