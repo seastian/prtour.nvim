@@ -97,6 +97,16 @@ Highlights: the HUD defines `PrtourTitle`, `PrtourKicker`, `PrtourDim`, `PrtourK
 3. The tour repoints gitsigns at the base revision and walks the manifest. Progress persists on every jump; hunks are identified by `sha256(path + hunk body)`, so seen-state survives anything that doesn't change the hunk itself.
 4. GitHub writes go through `gh`: comments accumulate into your single pending review (GraphQL — repeated saves append), and a final submit attaches the verdict.
 
+## Tests
+
+The pure modules (no `vim.*`, no IO) run without a Neovim. From the repo root:
+
+```sh
+luajit tests/run.lua
+```
+
+The runner discovers every `tests/*_spec.lua`, so new pure modules are tested by dropping a spec beside the existing ones.
+
 ## Status
 
 Built for my own workflow and shaped by using it on real PRs. Expect sharp edges; issues and PRs welcome.
