@@ -113,11 +113,13 @@ function M.pr_view(number, cb)
   end)
 end
 
---- PR head commit, GraphQL node id and declared base branch in one API call.
+--- PR head commit, GraphQL node id, declared base branch, and the title +
+--- author login in one API call. The title/author ride along so a starting
+--- tour can persist them onto its saved record (ticket #4) with no extra call.
 ---@param number integer
----@param cb fun(meta: {head_oid: string, id: string, base_ref: string|nil}|nil, err: string|nil)
+---@param cb fun(meta: {head_oid: string, id: string, base_ref: string|nil, title: string|nil, author: string|nil}|nil, err: string|nil)
 function M.pr_meta(number, cb)
-  run({ 'gh', 'pr', 'view', tostring(number), '--json', 'headRefOid,id,baseRefName' }, function(stdout, err)
+  run({ 'gh', 'pr', 'view', tostring(number), '--json', 'headRefOid,id,baseRefName,title,author' }, function(stdout, err)
     if not stdout then
       return cb(nil, err)
     end
@@ -125,7 +127,13 @@ function M.pr_meta(number, cb)
     if not ok or type(meta) ~= 'table' then
       return cb(nil, 'could not parse pr view output')
     end
-    cb({ head_oid = meta.headRefOid, id = meta.id, base_ref = meta.baseRefName }, nil)
+    cb({
+      head_oid = meta.headRefOid,
+      id = meta.id,
+      base_ref = meta.baseRefName,
+      title = type(meta.title) == 'string' and meta.title ~= '' and meta.title or nil,
+      author = type(meta.author) == 'table' and meta.author.login or nil,
+    }, nil)
   end)
 end
 

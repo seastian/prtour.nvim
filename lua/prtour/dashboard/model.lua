@@ -7,7 +7,8 @@
 --   slug            string  this repo's cache-key prefix (scopes records/PRs)
 --   records         table[] decoded progress records for the cache dir, each
 --                           { key, label, resume, seen (string[]), total,
---                             pos, last_touched (epoch) }
+--                             pos, last_touched (epoch), and for PR tours
+--                             title/author (ticket #4; absent on older records) }
 --   prs             table[] open PRs as `gh` returns them, or nil while the
 --                           async fetch is still in flight
 --   git             table   { branch, dirty (bool), default_base (e.g.
@@ -42,6 +43,19 @@ local function in_repo(record, slug)
   return record.key:sub(1, #prefix) == prefix
 end
 
+--- The Resume line's headline. A PR tour enriched at start with the PR title
+--- (ticket #4) reads as "<title>  ·  <author>", so a review is recognisable
+--- without opening it — from local data only, no network on dashboard open.
+--- Records predating the enrichment (no stored title) and local reviews fall
+--- back to the record's own label (e.g. `PR #7`).
+local function headline(record)
+  if record.resume.kind ~= 'pr' or type(record.title) ~= 'string' or record.title == '' then
+    return record.label
+  end
+  local author = type(record.author) == 'string' and record.author ~= '' and record.author or nil
+  return author and (record.title .. '  ·  ' .. author) or record.title
+end
+
 --- Shape one record into a Resume entry: a `PR`/`local` badge, the two progress
 --- figures, when it was last touched, and the descriptor to resume it.
 local function resume_entry(record)
@@ -50,7 +64,7 @@ local function resume_entry(record)
     key = record.key,
     kind = kind,
     badge = kind == 'pr' and 'PR' or 'local',
-    label = record.label,
+    label = headline(record),
     walked = walked(record),
     total = tonumber(record.total),
     last_touched = record.last_touched,

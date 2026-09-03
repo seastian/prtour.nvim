@@ -106,6 +106,51 @@ describe('dashboard model — resume list', function()
     eq(loc.total, 3)
   end)
 
+  it('shows the stored PR title and author on the resume line', function()
+    local m = build {
+      records = {
+        record {
+          key = SLUG .. '-pr-7',
+          label = 'PR #7',
+          title = 'Add dark mode',
+          author = 'alice',
+          resume = { kind = 'pr', pr = 7 },
+          seen = { 'a' },
+        },
+      },
+    }
+    eq(m.resume[1].label, 'Add dark mode  ·  alice')
+  end)
+
+  it('shows just the title when a PR record stored no author', function()
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-7', label = 'PR #7', title = 'Add dark mode', seen = { 'a' } },
+      },
+    }
+    eq(m.resume[1].label, 'Add dark mode')
+  end)
+
+  it('falls back to #number for records predating title enrichment', function()
+    local m = build {
+      records = {
+        record { key = SLUG .. '-pr-7', label = 'PR #7', resume = { kind = 'pr', pr = 7 }, seen = { 'a' } },
+      },
+    }
+    eq(m.resume[1].label, 'PR #7')
+  end)
+
+  it('never enriches a local review with a stray stored title', function()
+    -- A local record could carry a title field from a future change; the
+    -- headline stays the branch label regardless.
+    local m = build {
+      records = {
+        record { key = SLUG .. '-local-feat', label = 'feat (local)', title = 'nope', resume = { kind = 'local' }, seen = { 'a' } },
+      },
+    }
+    eq(m.resume[1].label, 'feat (local)')
+  end)
+
   it('drops malformed records rather than crashing', function()
     local m = build {
       records = {

@@ -57,6 +57,8 @@ local function save_progress()
       sha = state.sha,
       seen = seen,
       label = state.label,
+      title = state.title,
+      author = state.author,
       total = #state.flat,
       resume = state.resume,
     })
@@ -178,7 +180,7 @@ local function toggle_split()
   end
 end
 
----@param opts {pr: integer, pr_id: string|nil, base: string, hunks: prtour.Hunk[], steps: prtour.Step[], mark_viewed: boolean}
+---@param opts {pr: integer, pr_id: string|nil, title: string|nil, author: string|nil, base: string, hunks: prtour.Hunk[], steps: prtour.Step[], mark_viewed: boolean}
 function M.start(opts)
   local by_id, flat, per_file_left = {}, {}, {}
   for _, h in ipairs(opts.hunks) do
@@ -197,6 +199,10 @@ function M.start(opts)
     pr_id = opts.pr_id,
     key = opts.key or tostring(opts.pr),
     label = opts.label or ('PR #' .. tostring(opts.pr)),
+    -- PR title + author, captured at checkout, persisted so the dashboard's
+    -- Resume line is recognisable without a network call (ticket #4).
+    title = opts.title,
+    author = opts.author,
     resume = opts.resume,
     sha = opts.sha,
     seen = {},

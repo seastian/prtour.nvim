@@ -218,15 +218,18 @@ function M._checkout(number)
   p:report 'checking PR status'
   gh.pr_meta(number, function(meta)
     local base_ref = meta and meta.base_ref
+    -- Captured here so a starting tour persists them without a second call.
+    local title = meta and meta.title
+    local author = meta and meta.author
     gh.head_sha(function(sha)
       if meta and sha and meta.head_oid == sha then
         -- Already on the PR head; nothing to fetch or check out.
-        return M._load_hunks(number, p, meta.id, base_ref)
+        return M._load_hunks(number, p, meta.id, base_ref, title, author)
       end
       p:report 'checking out branch'
       gh.checkout(number, function(ok, err)
         if ok then
-          return M._load_hunks(number, p, meta and meta.id, base_ref)
+          return M._load_hunks(number, p, meta and meta.id, base_ref, title, author)
         end
         if not err:find('already used by worktree', 1, true) then
           return p:fail('checkout failed: ' .. err)
@@ -237,7 +240,7 @@ function M._checkout(number)
           if not ok2 then
             return p:fail('detached checkout failed: ' .. err2)
           end
-          M._load_hunks(number, p, meta and meta.id, base_ref)
+          M._load_hunks(number, p, meta and meta.id, base_ref, title, author)
         end)
       end)
     end)
@@ -248,7 +251,9 @@ end
 ---@param p prtour.Progress
 ---@param pr_id string|nil
 ---@param base_ref string|nil the PR's declared base branch
-function M._load_hunks(number, p, pr_id, base_ref)
+---@param title string|nil the PR title, for the saved record's resume line
+---@param author string|nil the PR author login, for the saved record
+function M._load_hunks(number, p, pr_id, base_ref, title, author)
   local gh = require('prtour.gh')
   local function with_base(base)
     p:report('diffing against ' .. base)
@@ -274,7 +279,7 @@ function M._load_hunks(number, p, pr_id, base_ref)
           lock_cmds[#lock_cmds + 1] = { file = h.file, dir = vim.fn.fnamemodify(h.file, ':h'), cmd = cmd }
         end
       end
-      M._start_tour(number, base, hunks, p, pr_id, lock_cmds)
+      M._start_tour(number, base, hunks, p, pr_id, lock_cmds, title, author)
     end)
   end
   if M.config.base then
@@ -394,7 +399,9 @@ end
 ---@param p prtour.Progress
 ---@param pr_id string|nil
 ---@param locks table[]|nil
-function M._start_tour(number, base, hunks, p, pr_id, locks)
+---@param title string|nil the PR title, persisted onto the saved record
+---@param author string|nil the PR author login, persisted onto the saved record
+function M._start_tour(number, base, hunks, p, pr_id, locks, title, author)
   local gh = require('prtour.gh')
   gh.head_sha(function(sha, err)
     if not sha then
@@ -416,6 +423,8 @@ function M._start_tour(number, base, hunks, p, pr_id, locks)
           pr = number,
           pr_id = pr_id,
           key = key,
+          title = title,
+          author = author,
           resume = { kind = 'pr', pr = number },
           sha = sha,
           base = base,
