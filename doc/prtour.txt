@@ -64,6 +64,7 @@ HIGHLIGHTS                                                 *prtour-highlights*
 
 Derived from the active colorscheme; override after setup: PrtourTitle,
 PrtourKicker, PrtourDim, PrtourKey, PrtourNext, PrtourAdded, PrtourRemoved,
+PrtourReviewed (reviewed-earlier badge and the HUD's covered figure),
 PrtourFlash (the step-change flash; links to IncSearch).
 
 ==============================================================================
@@ -71,6 +72,11 @@ NOTES                                                           *prtour-notes*
 
 - Progress is content-addressed: a hunk counts as seen by the hash of its
   content, so rebases, force-pushes and unrelated edits don't reset it.
+- Seen carries across same-repo tours: content walked in one tour (e.g. a local
+  review before the PR) shows as "reviewed earlier" in another and is pre-seeded
+  as seen, so ]u parks on genuinely-new hunks. The HUD tracks two figures —
+  walked-here (this tour) and covered (walked-here + reviewed-earlier) — and a
+  tour is complete when everything is covered.
 - Reading order manifests are cached per diff under
   stdpath('cache')/prtour/; caches older than 45 days are pruned.
 - :checkhealth prtour verifies all external dependencies (load the plugin

@@ -136,6 +136,7 @@ function M.start_local(base_arg, sopts)
           end
           require('prtour.tour').start {
             key = key,
+            slug = repo_slug(),
             label = branch .. ' (local)',
             resume = { kind = 'local', base_arg = base_arg },
             sha = diff_hash,
@@ -423,6 +424,7 @@ function M._start_tour(number, base, hunks, p, pr_id, locks, title, author)
           pr = number,
           pr_id = pr_id,
           key = key,
+          slug = repo_slug(),
           title = title,
           author = author,
           resume = { kind = 'pr', pr = number },
