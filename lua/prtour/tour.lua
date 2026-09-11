@@ -88,6 +88,170 @@ local function fg_of(group)
   return ok and h.fg or nil
 end
 
+local function bg_of(group)
+  local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+  return ok and h.bg or nil
+end
+
+--- Mix `fg` into `bg` at `alpha` (0..1); both are 0xRRGGBB ints.
+local function blend(fg, bg, alpha)
+  if not (fg and bg) then
+    return nil
+  end
+  local function channel(place)
+    local f, b = math.floor(fg / place) % 256, math.floor(bg / place) % 256
+    return math.floor(f * alpha + b * (1 - alpha) + 0.5)
+  end
+  return channel(65536) * 65536 + channel(256) * 256 + channel(1)
+end
+
+-- Left alone, gitsigns' diff highlights resolve to whatever the colorscheme
+-- happens to have: the inline word-diff groups fall back to `TermCursor` (a
+-- neutral grey block that reads as a selection, not a change) and the deleted
+-- virtual lines to `DiffDelete`, which in many schemes -- solarized included --
+-- is `reverse` with no background, so a removed line becomes a saturated slab
+-- with its syntax colours flattened out. Both invert the hierarchy a diff
+-- wants. GitHub washes the whole line faintly and saturates only the characters
+-- that actually changed; these are those two mixes, blended against the
+-- scheme's own accents so the result still belongs to the colorscheme.
+--
+-- The two knobs: how much of the accent goes into the background for the
+-- whole-line wash, and for the changed span inside it. GitHub uses roughly
+-- .15/.40 over a near-black page; solarized's background already carries green
+-- and blue, so a red tint needs a little more to separate from it.
+local LINE_MIX, INLINE_MIX = 0.22, 0.45
+
+local DIFF_HL_GROUPS = {
+  'GitSignsAddLn',
+  'GitSignsChangeLn',
+  'GitSignsChangedeleteLn',
+  'GitSignsDeleteLn',
+  'GitSignsTopdeleteLn',
+  'GitSignsUntrackedLn',
+  'GitSignsAddInline',
+  'GitSignsChangeInline',
+  'GitSignsDeleteInline',
+  'GitSignsDeleteVirtLn',
+  'GitSignsVirtLnum',
+  -- The side-by-side split is a real vimdiff, so it ignores every GitSigns
+  -- group above and reads these instead -- with the same inversion: solarized's
+  -- DiffDelete and DiffText are `reverse`, which turns filler rows into solid
+  -- red slabs and the changed span into a solid teal one, while DiffAdd and
+  -- DiffChange are foreground-only and so wash nothing at all.
+  'DiffAdd',
+  'DiffChange',
+  'DiffDelete',
+  'DiffText',
+}
+
+local saved_diff_hls
+
+--- GitHub-shaped diff palette for the tour, derived from the colorscheme.
+local function apply_diff_hls()
+  if not saved_diff_hls then
+    saved_diff_hls = {}
+    for _, group in ipairs(DIFF_HL_GROUPS) do
+      local ok, h = pcall(vim.api.nvim_get_hl, 0, { name = group })
+      h = ok and h or {}
+      -- gitsigns registers these with `default = true`, which makes
+      -- nvim_set_hl a no-op against an already-defined group -- i.e. against
+      -- our own override. Drop it so the restore actually lands.
+      h.default = nil
+      saved_diff_hls[group] = h
+    end
+  end
+  local bg = bg_of 'Normal' or (vim.o.background == 'light' and 0xFFFFFF or 0x000000)
+  -- Deliberately not falling back to DiffAdd/DiffDelete/DiffChange: we
+  -- overwrite those below, so reading them here would make every re-apply
+  -- derive from the previous re-apply.
+  local added = fg_of 'Added' or fg_of 'String'
+  local removed = fg_of 'Removed' or fg_of 'ErrorMsg' or fg_of 'Error'
+  local changed = fg_of 'Changed' or fg_of 'WarningMsg'
+  local function set(group, spec)
+    vim.api.nvim_set_hl(0, group, spec)
+  end
+  -- Background only, never `reverse`, so treesitter colours survive on top.
+  set('GitSignsAddLn', { bg = blend(added, bg, LINE_MIX) })
+  set('GitSignsUntrackedLn', { bg = blend(added, bg, LINE_MIX) })
+  set('GitSignsChangeLn', { bg = blend(changed, bg, LINE_MIX) })
+  set('GitSignsChangedeleteLn', { bg = blend(changed, bg, LINE_MIX) })
+  set('GitSignsDeleteVirtLn', { bg = blend(removed, bg, LINE_MIX) })
+  -- A `delete` sign sits on the line *after* the deletion, which is unchanged
+  -- code -- washing it red would lie about what moved. The removed text has
+  -- its own virtual lines above, and those carry the colour instead.
+  set('GitSignsDeleteLn', {})
+  set('GitSignsTopdeleteLn', {})
+  set('GitSignsAddInline', { bg = blend(added, bg, INLINE_MIX) })
+  set('GitSignsChangeInline', { bg = blend(changed, bg, INLINE_MIX) })
+  set('GitSignsDeleteInline', { bg = blend(removed, bg, INLINE_MIX) })
+  -- Removed lines are numbered in the *old* file's coordinates. Worth having,
+  -- never worth reading first.
+  set('GitSignsVirtLnum', { fg = fg_of 'NonText', bg = blend(removed, bg, LINE_MIX) })
+
+  -- Vimdiff's own palette, on the same two mixes. `DiffAdd` here means "a line
+  -- only this side has", so it takes the added wash; `DiffText` is the changed
+  -- span inside a `DiffChange` line, so it takes the inline mix.
+  set('DiffAdd', { bg = blend(added, bg, LINE_MIX) })
+  set('DiffChange', { bg = blend(changed, bg, LINE_MIX) })
+  set('DiffText', { bg = blend(changed, bg, INLINE_MIX) })
+  -- `DiffDelete` is not deleted code -- it is the filler rows padding one pane
+  -- against the other, i.e. "nothing is here". GitHub leaves that cell blank;
+  -- a faint neutral band is the closest vim gets, and matching fg to bg hides
+  -- the '-' fill characters that would otherwise stripe it.
+  local filler = blend(fg_of 'NonText', bg, 0.10)
+  set('DiffDelete', { bg = filler, fg = filler })
+end
+
+local function restore_diff_hls()
+  if not saved_diff_hls then
+    return
+  end
+  for group, spec in pairs(saved_diff_hls) do
+    pcall(vim.api.nvim_set_hl, 0, group, spec)
+  end
+  saved_diff_hls = nil
+  -- Groups we captured before gitsigns had defined them restore to nothing;
+  -- let gitsigns re-derive its own defaults rather than leaving them blank.
+  pcall(function()
+    require('gitsigns.highlight').setup_highlights()
+  end)
+end
+
+-- gitsigns numbers deleted virtual lines from the hunk's start in the OLD file
+-- but renders them through 'relativenumber', so with relative numbers on the
+-- figure shown is |old_line - cursor_line| -- arithmetic across two coordinate
+-- systems, which means nothing. Absolute numbers make that column honest, and
+-- a diff is read as a block anyway.
+local suppressed_rnu = {}
+
+local function suppress_relativenumber(win)
+  win = win or vim.api.nvim_get_current_win()
+  if suppressed_rnu[win] or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  if vim.api.nvim_win_get_config(win).relative ~= '' then
+    return -- floats (the HUD) keep whatever they had
+  end
+  local ok, on = pcall(function()
+    return vim.wo[win].relativenumber
+  end)
+  if ok and on then
+    suppressed_rnu[win] = true
+    vim.wo[win].relativenumber = false
+  end
+end
+
+local function restore_relativenumber()
+  for win in pairs(suppressed_rnu) do
+    if vim.api.nvim_win_is_valid(win) then
+      pcall(function()
+        vim.wo[win].relativenumber = true
+      end)
+    end
+  end
+  suppressed_rnu = {}
+end
+
 local function leader_disp()
   local l = vim.g.mapleader
   return (l == nil or l == '') and '\\' or l == ' ' and '␣' or l
@@ -104,6 +268,9 @@ local function define_hls()
   vim.api.nvim_set_hl(0, 'PrtourRemoved', { fg = fg_of 'Removed' or fg_of 'Error', bold = true })
   vim.api.nvim_set_hl(0, 'PrtourReviewed', { fg = fg_of 'Question' or fg_of 'Special', italic = true })
   vim.api.nvim_set_hl(0, 'PrtourFlash', { link = 'IncSearch' })
+  if saved_diff_hls then
+    apply_diff_hls() -- re-derive against the (possibly new) colorscheme
+  end
 end
 
 local saved_maps = {}
@@ -128,15 +295,36 @@ local function gitsigns()
   return ok and gs or nil
 end
 
---- Side-by-side vimdiff of the current file against the tour base.
-local function open_split(retries)
+local inline_rendering = false
+
+--- gitsigns' in-buffer diff layer: deleted lines as virtual text, the line
+--- wash, and word-level highlights. On in the normal tour view; off in the
+--- side-by-side, where vimdiff already shows both sides.
+local function set_inline_rendering(on)
+  local gs = gitsigns()
+  if not gs or inline_rendering == on then
+    return
+  end
+  inline_rendering = on
+  pcall(gs.toggle_deleted, on)
+  pcall(gs.toggle_word_diff, on)
+  pcall(gs.toggle_linehl, on)
+end
+
+--- Side-by-side vimdiff of the current file against the tour base. `quiet`
+--- suppresses the "can't diff this one" messages, for the automatic re-split
+--- on every jump -- there the split simply sits out files with no base.
+local function open_split(retries, quiet)
   local gs = gitsigns()
   if not (gs and state) then
     return
   end
   local h = state.pos >= 1 and state.by_id[state.flat[state.pos].id] or nil
   if h and h.added then
-    return vim.notify('prtour: file is new in this PR — no base version to diff against', vim.log.levels.INFO)
+    if not quiet then
+      vim.notify('prtour: file is new in this PR — no base version to diff against', vim.log.levels.INFO)
+    end
+    return
   end
   -- diffthis silently fails until gitsigns has attached AND computed the
   -- base-revision text (async after our change_base); retry until it's ready.
@@ -146,19 +334,24 @@ local function open_split(retries)
   if ok and not (bcache and bcache.compare_text) then
     retries = retries or 0
     if retries >= 25 then
-      return vim.notify('prtour: gitsigns could not load this file (not tracked at the base?)', vim.log.levels.WARN)
+      if not quiet then
+        vim.notify('prtour: gitsigns could not load this file (not tracked at the base?)', vim.log.levels.WARN)
+      end
+      return
     end
     return vim.defer_fn(function()
       if state and vim.api.nvim_get_current_buf() == buf then
-        open_split(retries + 1)
+        open_split(retries + 1, quiet)
       end
     end, 200)
   end
   gs.diffthis(state.base)
+  set_inline_rendering(false)
 end
 
 --- Close the gitsigns base-version window; diff mode resets automatically.
 local function close_split()
+  set_inline_rendering(true)
   for _, w in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local name = vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(w))
     if name:match '^gitsigns://' then
@@ -175,8 +368,10 @@ end
 
 local function toggle_split()
   if in_split() then
+    state.split_wanted = false
     close_split()
   else
+    state.split_wanted = true
     open_split()
   end
 end
@@ -260,9 +455,9 @@ function M.start(opts)
   local gs = gitsigns()
   if gs then
     gs.change_base(opts.base, true)
-    pcall(gs.toggle_deleted, true)
-    pcall(gs.toggle_word_diff, true)
   end
+  apply_diff_hls()
+  set_inline_rendering(true)
   saved_maps = {}
   for _, lhs in ipairs { '<CR>', '<BS>' } do
     local existing = vim.fn.maparg(lhs, 'n', false, true)
@@ -308,10 +503,17 @@ function M.start(opts)
   if not opts.preserve_comments then
     require('prtour.comments').reset()
   end
+  local tour_group = vim.api.nvim_create_augroup('prtour-tour', { clear = true })
   vim.api.nvim_create_autocmd('CursorMoved', {
-    group = vim.api.nvim_create_augroup('prtour-tour', { clear = true }),
+    group = tour_group,
     callback = function()
       update_hud_side()
+    end,
+  })
+  vim.api.nvim_create_autocmd('WinEnter', {
+    group = tour_group,
+    callback = function()
+      suppress_relativenumber()
     end,
   })
   if opts.pr then
@@ -468,12 +670,18 @@ local function teardown(quiet)
     vim.api.nvim_buf_clear_namespace(state.badge_buf, ns, 0, -1)
   end
   close_hud()
+  -- Leave no diff behind: without this the base pane and the window's 'diff'
+  -- outlive the tour that opened them.
+  if state.split_wanted or in_split() then
+    close_split()
+  end
   local gs = gitsigns()
   if gs then
     gs.reset_base(true)
-    pcall(gs.toggle_deleted, false)
-    pcall(gs.toggle_word_diff, false)
   end
+  set_inline_rendering(false)
+  restore_relativenumber()
+  restore_diff_hls()
   state = nil
   if not quiet then
     vim.notify 'prtour: tour ended'
@@ -532,6 +740,14 @@ end
 
 ---@param h prtour.Hunk
 local function open_hunk(h)
+  -- 'diff' is a WINDOW option, so it survives the `edit` below while the other
+  -- pane keeps the previous file's base buffer -- leaving the two panes diffing
+  -- unrelated files. gitsigns.diffthis() also returns early when 'diff' is
+  -- already set, so the split can't simply be re-opened over the top: it has to
+  -- come down first and be rebuilt for the file we're arriving at.
+  if in_split() then
+    close_split()
+  end
   ensure_normal_window()
   if h.deleted then
     -- No local file; show the base version read-only.
@@ -549,10 +765,17 @@ local function open_hunk(h)
   else
     vim.cmd.edit(vim.fn.fnameescape(h.file))
   end
+  suppress_relativenumber()
   local last = vim.api.nvim_buf_line_count(0)
   local target = math.min(h.change_line or h.start_line, last)
   vim.api.nvim_win_set_cursor(0, { target, 0 })
   vim.cmd 'normal! zz'
+  -- Rebuild the split against the new file, positioned on the hunk so the base
+  -- pane opens aligned. Files added by the PR have no base; those just show
+  -- single-pane until the tour reaches one that does.
+  if state.split_wanted then
+    open_split(nil, true)
+  end
   require('prtour.threads').decorate(vim.api.nvim_get_current_buf(), h.file)
   -- Transient arrival badges at the hunk's first line; cleared on next jump.
   if state.badge_buf and vim.api.nvim_buf_is_valid(state.badge_buf) then
