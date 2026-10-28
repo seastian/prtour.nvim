@@ -225,11 +225,9 @@ function M._load_hunks(number, p, pr_id, base_ref, title, author)
   end
   if base_ref then
     -- Diff against the PR's declared base, which matters for stacked PRs.
-    -- Non-default bases move and get rebased onto; fetch those first.
-    local default = vim.trim(vim.fn.system { 'git', 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD' })
-    if 'origin/' .. base_ref == default then
-      return with_base(default)
-    end
+    -- Always fetch it first, default branch included: once the PR has merged
+    -- in a newer base than our stale ref, the three-dot merge-base falls back
+    -- to the old commit and the diff fills up with everything merged since.
     p:report('fetching base branch ' .. base_ref)
     return vim.system({ 'git', 'fetch', 'origin', base_ref }, { text = true }, function()
       vim.schedule(function()
