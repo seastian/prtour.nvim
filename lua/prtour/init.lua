@@ -210,12 +210,42 @@ function M._load_hunks(number, p, pr_id, base_ref, title, author)
         ['yarn.lock'] = { 'yarn', 'install' },
         ['spago.lock'] = { 'spago', 'install' },
       }
-      for _, h in ipairs(hunks) do
-        local cmd = INSTALLERS[h.file:match '([^/]+)$']
-        if cmd and not seen_locks[h.file] then
-          seen_locks[h.file] = true
-          lock_cmds[#lock_cmds + 1] = { file = h.file, dir = vim.fn.fnamemodify(h.file, ':h'), cmd = cmd }
+      local function add_lock(file)
+        if not seen_locks[file] then
+          seen_locks[file] = true
+          local cmd = INSTALLERS[file:match '([^/]+)$']
+          lock_cmds[#lock_cmds + 1] = { file = file, dir = vim.fn.fnamemodify(file, ':h'), cmd = cmd }
         end
+      end
+      -- Lockfiles whose install state we can actually check; spago has no
+      -- marker, so it's only offered when the PR changes its lockfile.
+      local CHECKABLE = { 'pnpm-lock.yaml', 'package-lock.json', 'yarn.lock' }
+      -- Also the nearest lockfile above each changed file, so a workspace the
+      -- PR touches but never installed here (or installed stale) gets offered
+      -- even when its lockfile isn't in the diff.
+      local walked = {}
+      local function add_nearest(dir)
+        while not walked[dir] do
+          walked[dir] = true
+          local prefix = dir == '.' and '' or dir .. '/'
+          local found = false
+          for _, name in ipairs(CHECKABLE) do
+            if vim.fn.filereadable(prefix .. name) == 1 then
+              add_lock(prefix .. name)
+              found = true
+            end
+          end
+          if found or dir == '.' then
+            return
+          end
+          dir = vim.fn.fnamemodify(dir, ':h')
+        end
+      end
+      for _, h in ipairs(hunks) do
+        if INSTALLERS[h.file:match '([^/]+)$'] then
+          add_lock(h.file)
+        end
+        add_nearest(vim.fn.fnamemodify(h.file, ':h'))
       end
       M._start_tour(number, base, hunks, p, pr_id, lock_cmds, title, author)
     end)
@@ -244,13 +274,17 @@ function M._load_hunks(number, p, pr_id, base_ref, title, author)
   end)
 end
 
-local function file_hash(path)
+---@param last_doc boolean|nil hash only the final YAML document
+local function file_hash(path, last_doc)
   local f = io.open(path, 'rb')
   if not f then
     return nil
   end
   local content = f:read '*a'
   f:close()
+  if last_doc then
+    content = ('\n' .. content):match '.*\n%-%-%-\n(.*)$' or content
+  end
   return vim.fn.sha256(content)
 end
 
@@ -265,9 +299,11 @@ local function install_needed(l)
   local prefix = l.dir == '.' and '' or l.dir .. '/'
   if l.cmd[1] == 'pnpm' then
     -- pnpm keeps a copy of the lockfile it installed; identical content
-    -- means up to date regardless of mtimes (checkouts bump them).
+    -- means up to date regardless of mtimes (checkouts bump them). pnpm 12
+    -- prefixes the lockfile with an env document pinning pnpm itself; the
+    -- copy holds only the main document after it.
     local installed = file_hash(prefix .. 'node_modules/.pnpm/lock.yaml')
-    return installed == nil or installed ~= file_hash(l.file)
+    return installed == nil or installed ~= file_hash(l.file, true)
   end
   local marker = INSTALL_MARKERS[l.cmd[1]]
   if not marker then
@@ -309,7 +345,7 @@ function M._offer_installs(locks)
     items[#items + 1] = ('run `%s` in %s/'):format(table.concat(l.cmd, ' '), l.dir)
   end
   items[#items + 1] = 'skip'
-  vim.ui.select(items, { prompt = 'Lockfiles changed since last install — run now?' }, function(_, idx)
+  vim.ui.select(items, { prompt = 'Dependencies not installed or out of date — run now?' }, function(_, idx)
     if not idx or idx == #items then
       return
     end
