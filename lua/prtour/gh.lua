@@ -250,7 +250,9 @@ function M.review_threads(number, cb)
           end
           threads[#threads + 1] = {
             path = node.path,
-            line = node.line,
+            -- GitHub returns a null line for threads it can no longer anchor
+            -- (outdated diffs); vim.NIL is truthy, so drop it to a real nil here.
+            line = node.line ~= vim.NIL and node.line or nil,
             start_line = node.startLine ~= vim.NIL and node.startLine or nil,
             is_resolved = node.isResolved,
             is_outdated = node.isOutdated,
